@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Screenshot annotations",
+    "description": "Marks up screenshots with numbered colored points, rectangles, and arrows plus comments, then sends the image together with the marker legend.",
+    "detail": "README.md"
+  }
+}

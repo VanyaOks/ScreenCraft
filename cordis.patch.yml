@@ -1,0 +1,5 @@
+# One Host row owns the save route; the same bare package name also owns the
+# browser half, which dsh-client-modules attaches to this row.
+- insert:
+    - id: screenshot-annotator
+      name: 'dsh-screenshot-annotator'
