@@ -23,7 +23,7 @@ window.__ModuleLoader__.load({
     const SAVE_ROUTE = '/screenshot-annotator/save';
     const TOKEN_DIVISOR = 750;
     const MAX_COMMENT = 400;
-    const EDITOR_VERSION = '0.4.0';
+    const EDITOR_VERSION = '0.5.0';
 
     /* ------------------------------------------------------------------ */
     /* Shared state                                                        */
@@ -100,6 +100,20 @@ window.__ModuleLoader__.load({
       { id: 'purple', value: '#8e24aa', text: '#ffffff' },
       { id: 'pink', value: '#d81b60', text: '#ffffff' },
     ]);
+
+    /** Color → purpose preset. Choosing a purpose also chooses its color. */
+    const MEANING_BY_COLOR = Object.freeze({
+      red: 'meaningError',
+      yellow: 'meaningFix',
+      green: 'meaningOk',
+      blue: 'meaningQuestion',
+      orange: 'meaningImportant',
+      purple: 'meaningIdea',
+      cyan: 'meaningNote',
+      pink: 'meaningRelation',
+    });
+
+    const meaningKeyFor = (colorId) => MEANING_BY_COLOR[colorId] ?? undefined;
 
     const MARKER_KINDS = Object.freeze(['move', 'point', 'rect', 'arrow', 'ruler']);
 
@@ -243,6 +257,15 @@ window.__ModuleLoader__.load({
       ctxMarker: 'Метка',
       ctxType: 'Тип',
       ctxColor: 'Цвет',
+      ctxMeaning: 'Назначение',
+      meaningError: 'ошибка',
+      meaningFix: 'поправить',
+      meaningOk: 'так и надо',
+      meaningQuestion: 'вопрос',
+      meaningImportant: 'важно',
+      meaningIdea: 'идея',
+      meaningNote: 'пояснение',
+      meaningRelation: 'связь',
       cropConfirm: 'Обрезать изображение и сбросить метки?',
       autoTrimNotice: 'Пустые поля обрезаны: {w}×{h}',
       croppedNotice: 'Изображение обрезано: {w}×{h}',
@@ -322,6 +345,15 @@ window.__ModuleLoader__.load({
       ctxMarker: 'Marker',
       ctxType: 'Type',
       ctxColor: 'Color',
+      ctxMeaning: 'Purpose',
+      meaningError: 'error',
+      meaningFix: 'fix',
+      meaningOk: 'as intended',
+      meaningQuestion: 'question',
+      meaningImportant: 'important',
+      meaningIdea: 'idea',
+      meaningNote: 'note',
+      meaningRelation: 'relation',
       cropConfirm: 'Crop the image and reset markers?',
       autoTrimNotice: 'Empty margins cropped: {w}×{h}',
       croppedNotice: 'Image cropped: {w}×{h}',
@@ -450,6 +482,13 @@ window.__ModuleLoader__.load({
 .sa-ctx-item:hover{background:var(--dsw-alias-bg-layer-2,rgba(255,255,255,.08))}
 .sa-ctx-item.sa-active{border-color:var(--dsw-alias-border-l1,rgba(255,255,255,.24));background:var(--dsw-alias-bg-layer-3,rgba(255,255,255,.12))}
 .sa-ctx-colors{flex-wrap:wrap;padding-top:2px}
+.sa-ctx-presets{flex-wrap:wrap}
+.sa-ctx-preset{display:inline-flex;flex:1 1 44%;align-items:center;gap:6px;height:26px;padding:0 6px;border:1px solid transparent;border-radius:6px;background:transparent;color:var(--dsw-alias-label-primary,#e8eaf0);font:inherit;font-size:11px;cursor:pointer;min-width:0}
+.sa-ctx-preset:hover{background:var(--dsw-alias-bg-layer-2,rgba(255,255,255,.08))}
+.sa-ctx-preset.sa-active{border-color:var(--dsw-alias-border-l1,rgba(255,255,255,.24));background:var(--dsw-alias-bg-layer-3,rgba(255,255,255,.12))}
+.sa-preset-dot{flex:0 0 auto;width:12px;height:12px;border-radius:50%;box-shadow:inset 0 0 0 1px rgba(255,255,255,.35)}
+.sa-preset-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sa-meaning-label{margin-left:5px;font-size:11px;line-height:1;color:var(--dsw-alias-label-secondary,#9aa1af);white-space:nowrap}
 .sa-ctx-types{flex-wrap:wrap}
 .sa-ctx-types .sa-ctx-item{flex:1 1 44%;min-width:0}
 .sa-btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:30px;padding:0 11px;border:1px solid var(--dsw-alias-border-l1,rgba(255,255,255,.16));border-radius:8px;background:transparent;color:var(--dsw-alias-label-primary,#e8eaf0);font:inherit;font-size:12px;cursor:pointer;white-space:nowrap}
@@ -1551,17 +1590,18 @@ window.__ModuleLoader__.load({
             className: currentKind === kind ? 'sa-ctx-item sa-active' : 'sa-ctx-item',
             onClick: () => applyContextKind(kind),
           }, h(Icon, { name: kind, size: 14 }), t(kind === 'point' ? 'toolPoint' : kind === 'rect' ? 'toolRect' : kind === 'ruler' ? 'toolRuler' : 'toolArrow')))),
-        h('div', { className: 'sa-ctx-label' }, t('ctxColor')),
-        h('div', { className: 'sa-ctx-row sa-ctx-colors' },
+        h('div', { className: 'sa-ctx-label' }, t('ctxMeaning')),
+        h('div', { className: 'sa-ctx-row sa-ctx-presets' },
           MARKER_COLORS.map((color) => h('button', {
             key: color.id,
             type: 'button',
-            className: currentColor === color.id ? 'sa-swatch sa-active' : 'sa-swatch',
+            className: currentColor === color.id ? 'sa-ctx-preset sa-active' : 'sa-ctx-preset',
             title: t(COLOR_KEYS[color.id]),
-            'aria-label': t(COLOR_KEYS[color.id]),
-            style: { background: color.value },
+            'aria-label': `${t(MEANING_BY_COLOR[color.id])} · ${t(COLOR_KEYS[color.id])}`,
             onClick: () => applyContextColor(color),
-          }))));
+          },
+          h('span', { className: 'sa-preset-dot', style: { background: color.value } }),
+          h('span', { className: 'sa-preset-label' }, t(MEANING_BY_COLOR[color.id]))))));
       };
 
       const radius = image === null ? 0 : badgeRadiusFor(image);
@@ -1756,19 +1796,22 @@ window.__ModuleLoader__.load({
                   h(ToolButton, { active: tool === 'arrow', title: t('toolArrow'), name: 'arrow', onClick: () => setTool('arrow') }),
                   h(ToolButton, { active: tool === 'ruler', title: t('toolRuler'), name: 'ruler', onClick: () => setTool('ruler') }),
                   h(ToolButton, { active: tool === 'crop', title: t('toolCrop'), name: 'crop', onClick: () => setTool('crop') })),
-                h('div', { className: 'sa-group' }, h('div', { className: 'sa-swatches' },
-                  MARKER_COLORS.map((color, index) => h('button', {
-                    key: color.id,
-                    type: 'button',
-                    className: colorIndex === index ? 'sa-swatch sa-active' : 'sa-swatch',
-                    title: t(COLOR_KEYS[color.id]),
-                    'aria-label': t(COLOR_KEYS[color.id]),
-                    style: { background: color.value },
-                    onClick: () => {
-                      colorCursorRef.current = index;
-                      setColorIndex(index);
-                    },
-                  })))),
+                h('div', { className: 'sa-group' },
+                  h('div', { className: 'sa-swatches' },
+                    MARKER_COLORS.map((color, index) => h('button', {
+                      key: color.id,
+                      type: 'button',
+                      className: colorIndex === index ? 'sa-swatch sa-active' : 'sa-swatch',
+                      title: `${t(MEANING_BY_COLOR[color.id])} · ${t(COLOR_KEYS[color.id])}`,
+                      'aria-label': `${t(MEANING_BY_COLOR[color.id])} · ${t(COLOR_KEYS[color.id])}`,
+                      style: { background: color.value },
+                      onClick: () => {
+                        colorCursorRef.current = index;
+                        setColorIndex(index);
+                      },
+                    }))),
+                  h('span', { className: 'sa-meaning-label' },
+                    t(MEANING_BY_COLOR[MARKER_COLORS[colorIndex % MARKER_COLORS.length].id]))),
                 h('div', { className: 'sa-group' },
                   h(ToolButton, { active: false, title: t('undo'), name: 'undo', onClick: undo }),
                   h(ToolButton, { active: false, title: t('redo'), name: 'redo', onClick: redo })),
@@ -1890,8 +1933,8 @@ window.__ModuleLoader__.load({
                     h('div', { className: 'sa-marker-body' },
                       h('div', { className: 'sa-marker-meta' },
                         group.markers.length === 1
-                          ? t(COLOR_KEYS[leader.color])
-                          : `${t('groupShapes').replace('{n}', String(group.markers.length))} · ${t(COLOR_KEYS[leader.color])}`),
+                          ? `${t(MEANING_BY_COLOR[leader.color])} · ${t(COLOR_KEYS[leader.color])}`
+                          : `${t('groupShapes').replace('{n}', String(group.markers.length))} · ${t(MEANING_BY_COLOR[leader.color])}`),
                       h('div', { className: 'sa-group-chips' },
                         group.markers.map((marker) => h('span', { key: marker.id, className: 'sa-chip' },
                           h('input', {
@@ -2011,12 +2054,14 @@ window.__ModuleLoader__.load({
       for (const group of groupMarkers(markers)) {
         const leader = group.markers[0];
         const color = t(COLOR_KEYS[leader.color] ?? 'colorRed');
+        const meaning = meaningKeyFor(leader.color);
+        const meaningText = meaning === undefined ? '' : ` (${t(meaning)})`;
         const comment = String(leader.comment ?? '').replace(/\s+/g, ' ').trim();
         const suffix = comment === '' ? '' : `: ${comment}`;
         const parts = group.markers.map((marker) => (
           `${t(kindKey(marker.kind))} ${markerCoordinates(marker, image.width, image.height)}`
         ));
-        lines.push(`#${leader.no} ${color} ${parts.join(' + ')}${suffix}`);
+        lines.push(`#${leader.no} ${color}${meaningText} ${parts.join(' + ')}${suffix}`);
       }
       return lines.join('\n');
     }

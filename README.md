@@ -8,6 +8,10 @@ The editor opens a full-window canvas where a screenshot is pasted (`Ctrl+V`),
 dropped, or picked from disk, and marked up with:
 
 - numbered points, rectangles, arrows, and rulers, each with its own color and comment;
+- color = purpose: the palette and the right-click menu pick a meaning — error (red),
+  fix (yellow), as intended (green), question (blue), important (orange), idea
+  (purple), note (cyan), relation (pink); the legend spells out the meaning next to
+  the color;
 - marker grouping: merge several shapes under one number and one shared comment
   (for example, three arrows that carry one message). Tick the markers in the list
   and press **Merge**; **Ungroup** splits them again;
