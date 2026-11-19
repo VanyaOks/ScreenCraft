@@ -23,7 +23,7 @@ window.__ModuleLoader__.load({
     const SAVE_ROUTE = '/screenshot-annotator/save';
     const TOKEN_DIVISOR = 750;
     const MAX_COMMENT = 400;
-    const EDITOR_VERSION = '0.6.0';
+    const EDITOR_VERSION = '0.6.1';
 
     /* ------------------------------------------------------------------ */
     /* Shared state                                                        */
@@ -1142,6 +1142,7 @@ window.__ModuleLoader__.load({
       const colorCursorRef = React.useRef(0);
       const markersRef = React.useRef(markers);
       const batchRef = React.useRef(batch);
+      const duplicateSelectedRef = React.useRef(undefined);
       const selectedRef = React.useRef(selectedId);
       const loadFileRef = React.useRef(() => {});
       const closedRef = React.useRef(false);
@@ -1340,7 +1341,7 @@ window.__ModuleLoader__.load({
           if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'd') {
             if (inField) return;
             event.preventDefault();
-            duplicateSelected();
+            duplicateSelectedRef.current?.();
             return;
           }
           if ((event.key === 'Delete' || event.key === 'Backspace') && !inField) {
@@ -1367,7 +1368,7 @@ window.__ModuleLoader__.load({
         };
         window.addEventListener('keydown', onKeyDown);
         return () => window.removeEventListener('keydown', onKeyDown);
-      }, [t, undo, redo, pushHistory, duplicateSelected, mergeSelection, image]);
+      }, [t, undo, redo, pushHistory, mergeSelection, image]);
 
       React.useEffect(() => {
         const onShift = (event) => {
@@ -1607,6 +1608,7 @@ window.__ModuleLoader__.load({
         setMergeSelection(clones.map((marker) => marker.id));
         setSelectedId(clones[0].id);
       };
+      duplicateSelectedRef.current = duplicateSelected;
 
       const onPointerDown = (event) => {
         if (image === null) return;
@@ -2774,6 +2776,35 @@ window.__ModuleLoader__.load({
     }
 
     /** Format the legend text for the composer. */
+    /** Show a readable message instead of a blank screen if the editor throws. */
+    class EditorErrorBoundary extends React.Component {
+      constructor(props) {
+        super(props);
+        this.state = { error: undefined };
+      }
+
+      static getDerivedStateFromError(error) {
+        return { error };
+      }
+
+      render() {
+        if (this.state.error !== undefined) {
+          return h('div', { className: 'sa-overlay' },
+            h('div', { className: 'sa-panel', style: { padding: '24px', gap: '12px' } },
+              h('h2', { style: { margin: 0, fontSize: '15px' } }, 'ScreenCraft'),
+              h('p', { style: { margin: 0, color: '#f2b84b', fontSize: '13px', whiteSpace: 'pre-wrap' } },
+                String(this.state.error)),
+              h('button', {
+                type: 'button',
+                className: 'sa-btn',
+                style: { alignSelf: 'flex-start' },
+                onClick: () => this.setState({ error: undefined }),
+              }, 'OK')));
+        }
+        return this.props.children;
+      }
+    }
+
     function buildMarkerLines(image, markers, t) {
       if (markers.length === 0) return [t('legendNoMarkers')];
       const lines = [];
@@ -2910,7 +2941,8 @@ window.__ModuleLoader__.load({
         }, withText(function Overlay() {
           const state = useStoreState();
           if (!state.open) return null;
-          return h(ScreenshotEditor, { sessionId: state.sessionId, t });
+          return h(EditorErrorBoundary, null,
+            h(ScreenshotEditor, { sessionId: state.sessionId, t }));
         })));
         effects.push(disposeOverlay);
 
