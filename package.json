@@ -1,8 +1,8 @@
 {
   "name": "dsh-screenshot-annotator",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "module",
-  "description": "Annotate screenshots with numbered colored markers, rectangles, arrows, and comments before sending them to the agent in DSH.",
+  "description": "ScreenCraft — annotate screenshots with numbered colored markers, rectangles, arrows, and rulers plus comments before sending them to the agent in DSH.",
   "license": "MIT",
   "repository": {
     "type": "git",

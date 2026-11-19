@@ -1,18 +1,18 @@
-# Screenshot annotations for DSH
+# ScreenCraft — screenshot annotations for DSH
 
 > Русская версия: [README.ru.md](README.ru.md)
 
-DSH (DeepSeek Harness) plugin that adds an annotation editor for screenshots. It
-adds an **Annotate screenshot** button to the composer tool row. The editor opens
-a full-window canvas where a screenshot is pasted (`Ctrl+V`), dropped, or picked
-from disk, and marked up with:
+DSH (DeepSeek Harness) plugin **ScreenCraft** that adds an annotation editor for
+screenshots. It adds an **Annotate screenshot** button to the composer tool row.
+The editor opens a full-window canvas where a screenshot is pasted (`Ctrl+V`),
+dropped, or picked from disk, and marked up with:
 
 - numbered points, rectangles, arrows, and rulers, each with its own color and comment;
 - marker grouping: merge several shapes under one number and one shared comment
   (for example, three arrows that carry one message). Tick the markers in the list
   and press **Merge**; **Ungroup** splits them again;
 - numbers stay sequential: deleting a marker renumbers the remaining ones without gaps;
-- a ruler marker for alignment lines: the **Ruler** tool draws a line with end ticks;
+- a ruler marker for alignment lines: the **Ruler** tool draws a line with end ticks; holding **Shift** while drawing snaps the angle to 10° steps (like Photoshop);
 - right-click on the image opens a menu for the marker type and color; right-click
   an existing marker changes its shape and color;
 - a pointer tool for moving and deleting existing markers;

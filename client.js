@@ -23,7 +23,7 @@ window.__ModuleLoader__.load({
     const SAVE_ROUTE = '/screenshot-annotator/save';
     const TOKEN_DIVISOR = 750;
     const MAX_COMMENT = 400;
-    const EDITOR_VERSION = '0.3.0';
+    const EDITOR_VERSION = '0.4.0';
 
     /* ------------------------------------------------------------------ */
     /* Shared state                                                        */
@@ -104,6 +104,18 @@ window.__ModuleLoader__.load({
     const MARKER_KINDS = Object.freeze(['move', 'point', 'rect', 'arrow', 'ruler']);
 
     const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+
+    /** Photoshop-like ruler snapping: 10° steps while Shift is held. */
+    const SNAP_ANGLE_STEP = Math.PI / 18;
+
+    function snapAnglePoint(start, point, step = SNAP_ANGLE_STEP) {
+      const dx = point.x - start.x;
+      const dy = point.y - start.y;
+      const length = Math.hypot(dx, dy);
+      if (length === 0) return point;
+      const angle = Math.round(Math.atan2(dy, dx) / step) * step;
+      return { x: start.x + Math.cos(angle) * length, y: start.y + Math.sin(angle) * length };
+    }
 
     const colorById = (id) => MARKER_COLORS.find((color) => color.id === id) ?? MARKER_COLORS[0];
 
@@ -210,7 +222,7 @@ window.__ModuleLoader__.load({
 
     const RU = {
       annotateButton: 'Аннотировать скриншот',
-      title: 'Аннотация скриншота',
+      title: 'ScreenCraft',
       subtitle: 'Вставьте скриншот, поставьте метки и добавьте комментарии — картинка и расшифровка меток уйдут в чат вместе. Правая кнопка мыши — тип и цвет метки.',
       pasteHint: 'Нажмите Ctrl+V, чтобы вставить скриншот',
       dropHint: 'или перетащите файл сюда',
@@ -289,7 +301,7 @@ window.__ModuleLoader__.load({
 
     const EN = {
       annotateButton: 'Annotate screenshot',
-      title: 'Screenshot annotation',
+      title: 'ScreenCraft',
       subtitle: 'Paste a screenshot, add markers and comments — the image and its marker legend go to the chat together. Right-click sets the marker type and color.',
       pasteHint: 'Press Ctrl+V to paste a screenshot',
       dropHint: 'or drop a file here',
@@ -1015,6 +1027,22 @@ window.__ModuleLoader__.load({
         return () => window.removeEventListener('keydown', onKeyDown);
       }, [t, undo, redo, pushHistory]);
 
+      React.useEffect(() => {
+        const onShift = (event) => {
+          if (event.key !== 'Shift') return;
+          const drag = dragRef.current;
+          if (drag === undefined || drag.mode !== 'draw' || drag.kind !== 'ruler' || drag.lastPoint === undefined) return;
+          const target = event.shiftKey ? snapAnglePoint(drag.start, drag.lastPoint) : drag.lastPoint;
+          setTemp({ kind: 'ruler', x1: drag.start.x, y1: drag.start.y, x2: target.x, y2: target.y });
+        };
+        window.addEventListener('keydown', onShift);
+        window.addEventListener('keyup', onShift);
+        return () => {
+          window.removeEventListener('keydown', onShift);
+          window.removeEventListener('keyup', onShift);
+        };
+      }, []);
+
       const toNatural = (event) => {
         const svg = svgRef.current;
         if (svg === null || image === null) return { x: 0, y: 0 };
@@ -1172,7 +1200,10 @@ window.__ModuleLoader__.load({
         if (drag === undefined || image === null) return;
         const point = toNatural(event);
         if (drag.mode === 'draw' || drag.mode === 'crop') {
-          setTemp({ kind: drag.kind ?? 'crop', x1: drag.start.x, y1: drag.start.y, x2: point.x, y2: point.y });
+          const kind = drag.kind ?? 'crop';
+          drag.lastPoint = point;
+          const target = kind === 'ruler' && event.shiftKey ? snapAnglePoint(drag.start, point) : point;
+          setTemp({ kind, x1: drag.start.x, y1: drag.start.y, x2: target.x, y2: target.y });
           return;
         }
         const dx = point.x - drag.start.x;
@@ -1209,9 +1240,10 @@ window.__ModuleLoader__.load({
             }
           }
         } else if (drag !== undefined && drag.mode === 'draw') {
-          const shape = temp;
           setTemp(null);
-          if (shape === null) return;
+          const point = toNatural(event);
+          const endPoint = drag.kind === 'ruler' && event.shiftKey ? snapAnglePoint(drag.start, point) : point;
+          const shape = { kind: drag.kind, x1: drag.start.x, y1: drag.start.y, x2: endPoint.x, y2: endPoint.y };
           const width = Math.abs(shape.x2 - shape.x1);
           const height = Math.abs(shape.y2 - shape.y1);
           if (shape.kind === 'rect' && width < 6 && height < 6) return;

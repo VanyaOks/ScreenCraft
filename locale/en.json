@@ -1,7 +1,7 @@
 {
   "meta": {
-    "title": "Screenshot annotations",
-    "description": "Marks up screenshots with numbered colored points, rectangles, and arrows plus comments, then sends the image together with the marker legend.",
+    "title": "ScreenCraft",
+    "description": "Screenshot annotation: numbered colored points, rectangles, arrows, and rulers with comments, marker groups with a shared comment; the image and the marker legend go to the chat together.",
     "detail": "README.md"
   }
 }
