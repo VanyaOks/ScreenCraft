@@ -23,7 +23,7 @@ window.__ModuleLoader__.load({
     const SAVE_ROUTE = '/screenshot-annotator/save';
     const TOKEN_DIVISOR = 750;
     const MAX_COMMENT = 400;
-    const EDITOR_VERSION = '0.2.2';
+    const EDITOR_VERSION = '0.3.0';
 
     /* ------------------------------------------------------------------ */
     /* Shared state                                                        */
@@ -101,7 +101,7 @@ window.__ModuleLoader__.load({
       { id: 'pink', value: '#d81b60', text: '#ffffff' },
     ]);
 
-    const MARKER_KINDS = Object.freeze(['move', 'point', 'rect', 'arrow']);
+    const MARKER_KINDS = Object.freeze(['move', 'point', 'rect', 'arrow', 'ruler']);
 
     const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 
@@ -110,7 +110,12 @@ window.__ModuleLoader__.load({
     const percent = (value, total) => Math.round((value / total) * 100);
 
     /** Marker label used in the legend text. */
-    const kindKey = (kind) => (kind === 'rect' ? 'kindRect' : kind === 'arrow' ? 'kindArrow' : 'kindPoint');
+    const kindKey = (kind) => {
+      if (kind === 'rect') return 'kindRect';
+      if (kind === 'arrow') return 'kindArrow';
+      if (kind === 'ruler') return 'kindRuler';
+      return 'kindPoint';
+    };
 
     /** Coordinate phrase for one marker, in percent of the image size. */
     function markerCoordinates(marker, width, height) {
@@ -163,6 +168,42 @@ window.__ModuleLoader__.load({
       };
     }
 
+    /**
+     * Give every marker group a sequential number in order of first appearance.
+     * Deleting a marker therefore closes the gap instead of leaving a hole in the
+     * numbering; all shapes of one group share the same number.
+     */
+    function renumberMarkers(markers) {
+      const numbers = new Map();
+      let next = 0;
+      for (const marker of markers) {
+        if (!numbers.has(marker.groupId)) {
+          next += 1;
+          numbers.set(marker.groupId, next);
+        }
+      }
+      return markers.map((marker) => {
+        const number = numbers.get(marker.groupId);
+        return marker.no === number ? marker : { ...marker, no: number };
+      });
+    }
+
+    /** Split the flat marker list into groups, preserving order. */
+    function groupMarkers(markers) {
+      const groups = [];
+      const byId = new Map();
+      for (const marker of markers) {
+        let group = byId.get(marker.groupId);
+        if (group === undefined) {
+          group = { id: marker.groupId, markers: [] };
+          byId.set(marker.groupId, group);
+          groups.push(group);
+        }
+        group.markers.push(marker);
+      }
+      return groups;
+    }
+
     /* ------------------------------------------------------------------ */
     /* Locale                                                              */
     /* ------------------------------------------------------------------ */
@@ -179,7 +220,13 @@ window.__ModuleLoader__.load({
       toolPoint: 'Точка',
       toolRect: 'Прямоугольник',
       toolArrow: 'Стрелка',
+      toolRuler: 'Линейка',
       toolCrop: 'Обрезать',
+      merge: 'Объединить ({n})',
+      ungroup: 'Разъединить',
+      deleteGroup: 'Удалить группу',
+      groupShapes: 'Фигур: {n}',
+      groupHint: 'Отметьте несколько меток и объедините их под один комментарий',
       ctxNewMarker: 'Новая метка',
       ctxMarker: 'Метка',
       ctxType: 'Тип',
@@ -221,6 +268,7 @@ window.__ModuleLoader__.load({
       kindPoint: 'точка',
       kindRect: 'прямоугольник',
       kindArrow: 'стрелка',
+      kindRuler: 'линейка',
       colorRed: 'красный',
       colorOrange: 'оранжевый',
       colorYellow: 'жёлтый',
@@ -251,7 +299,13 @@ window.__ModuleLoader__.load({
       toolPoint: 'Point',
       toolRect: 'Rectangle',
       toolArrow: 'Arrow',
+      toolRuler: 'Ruler',
       toolCrop: 'Crop',
+      merge: 'Merge ({n})',
+      ungroup: 'Ungroup',
+      deleteGroup: 'Delete group',
+      groupShapes: 'Shapes: {n}',
+      groupHint: 'Select several markers and merge them under one comment',
       ctxNewMarker: 'New marker',
       ctxMarker: 'Marker',
       ctxType: 'Type',
@@ -293,6 +347,7 @@ window.__ModuleLoader__.load({
       kindPoint: 'point',
       kindRect: 'rectangle',
       kindArrow: 'arrow',
+      kindRuler: 'ruler',
       colorRed: 'red',
       colorOrange: 'orange',
       colorYellow: 'yellow',
@@ -330,6 +385,8 @@ window.__ModuleLoader__.load({
           [h('rect', { key: 'r', x: 4, y: 6, width: 16, height: 12, rx: 2 })],
         ] : name === 'arrow' ? [
           [h('path', { key: 'l', d: 'M4 19L19 5' }), h('path', { key: 'a', d: 'M12 5h7v7' })],
+        ] : name === 'ruler' ? [
+          [h('path', { key: 'l', d: 'M4 20L20 6' }), h('path', { key: 'a', d: 'M4 20l-1.5-1.5M20 6l1.5 1.5' }), h('path', { key: 'b', d: 'M8 16l-1.5-1.5M12 12l-1.5-1.5M16 8l-1.5-1.5' })],
         ] : name === 'crop' ? [
           [h('path', { key: 'a', d: 'M7 3v14h14' }), h('path', { key: 'b', d: 'M3 7h14v14' })],
         ] : name === 'undo' ? [
@@ -381,6 +438,8 @@ window.__ModuleLoader__.load({
 .sa-ctx-item:hover{background:var(--dsw-alias-bg-layer-2,rgba(255,255,255,.08))}
 .sa-ctx-item.sa-active{border-color:var(--dsw-alias-border-l1,rgba(255,255,255,.24));background:var(--dsw-alias-bg-layer-3,rgba(255,255,255,.12))}
 .sa-ctx-colors{flex-wrap:wrap;padding-top:2px}
+.sa-ctx-types{flex-wrap:wrap}
+.sa-ctx-types .sa-ctx-item{flex:1 1 44%;min-width:0}
 .sa-btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:30px;padding:0 11px;border:1px solid var(--dsw-alias-border-l1,rgba(255,255,255,.16));border-radius:8px;background:transparent;color:var(--dsw-alias-label-primary,#e8eaf0);font:inherit;font-size:12px;cursor:pointer;white-space:nowrap}
 .sa-btn:hover{background:var(--dsw-alias-bg-layer-2,rgba(255,255,255,.08))}
 .sa-btn:disabled{opacity:.45;cursor:default}
@@ -416,7 +475,7 @@ window.__ModuleLoader__.load({
 .sa-side.sa-side-below .sa-legend{border-top:1px solid var(--dsw-alias-border-l1,rgba(255,255,255,.1));padding:6px 12px;flex:0 0 auto}
 .sa-side.sa-side-below .sa-legend pre{max-height:56px}
 .sa-side.sa-side-below.sa-collapsed{max-height:44px}
-.sa-side.sa-side-below.sa-collapsed .sa-marker-list,.sa-side.sa-side-below.sa-collapsed .sa-empty,.sa-side.sa-side-below.sa-collapsed .sa-legend{display:none}
+.sa-side.sa-side-below.sa-collapsed .sa-marker-list,.sa-side.sa-side-below.sa-collapsed .sa-empty,.sa-side.sa-side-below.sa-collapsed .sa-legend,.sa-side.sa-side-below.sa-collapsed .sa-group-hint{display:none}
 .sa-side.sa-side-below.sa-collapsed .sa-side-head{border-bottom:0}
 .sa-btn-small{height:24px;padding:0 8px;font-size:11px;margin-left:8px}
 .sa-fit{font-size:14px}
@@ -433,6 +492,16 @@ window.__ModuleLoader__.load({
 .sa-marker textarea:focus{outline:none;border-color:var(--dsw-alias-accent,#4d6bfe)}
 .sa-delete{flex:0 0 auto;align-self:flex-start;display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary,#9aa1af);cursor:pointer}
 .sa-delete:hover{background:rgba(229,57,53,.16);color:#ef5350}
+.sa-group-chips{display:flex;flex-wrap:wrap;gap:4px}
+.sa-chip{display:inline-flex;align-items:center;gap:3px;max-width:100%;padding:1px 4px;border:1px solid var(--dsw-alias-border-l1,rgba(255,255,255,.14));border-radius:6px;background:var(--dsw-alias-bg-layer-2,rgba(255,255,255,.04));font-size:10px;color:var(--dsw-alias-label-secondary,#9aa1af)}
+.sa-chip input{width:11px;height:11px;margin:0;accent-color:var(--dsw-alias-accent,#4d6bfe)}
+.sa-chip-label{max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:0;background:transparent;color:inherit;font:inherit;cursor:pointer;padding:0}
+.sa-chip-label:hover{color:var(--dsw-alias-label-primary,#e8eaf0)}
+.sa-chip-del{border:0;background:transparent;color:inherit;cursor:pointer;padding:0 1px;font-size:12px;line-height:1}
+.sa-chip-del:hover{color:#ef5350}
+.sa-group-actions{display:flex;gap:6px;margin-top:2px}
+.sa-merge{margin-left:6px}
+.sa-group-hint{padding:6px 12px;border-bottom:1px solid var(--dsw-alias-border-l1,rgba(255,255,255,.08));font-size:11px;line-height:1.4;color:var(--dsw-alias-label-secondary,#9aa1af)}
 .sa-empty{margin:18px 12px;font-size:12px;line-height:1.5;color:var(--dsw-alias-label-secondary,#9aa1af)}
 .sa-legend{border-top:1px solid var(--dsw-alias-border-l1,rgba(255,255,255,.1));padding:10px 12px}
 .sa-legend summary{cursor:pointer;font-size:12px;color:var(--dsw-alias-label-secondary,#9aa1af);list-style:none}
@@ -522,6 +591,28 @@ window.__ModuleLoader__.load({
         return;
       }
       const lineWidth = Math.max(2, outWidth * 0.0026);
+      if (marker.kind === 'ruler') {
+        strokeWithHalo(target, () => {
+          target.beginPath();
+          target.moveTo(x1, y1);
+          target.lineTo(x2, y2);
+        }, color, lineWidth);
+        const angle = Math.atan2(y2 - y1, x2 - x1);
+        const tick = Math.max(10, radius * 0.9);
+        const tickX = -Math.sin(angle) * tick;
+        const tickY = Math.cos(angle) * tick;
+        strokeWithHalo(target, () => {
+          target.beginPath();
+          target.moveTo(x1 - tickX, y1 - tickY);
+          target.lineTo(x1 + tickX, y1 + tickY);
+          target.moveTo(x2 - tickX, y2 - tickY);
+          target.lineTo(x2 + tickX, y2 + tickY);
+        }, color, lineWidth);
+        const badgeX = clamp((x1 + x2) / 2 - Math.sin(angle) * radius * 1.5, radius, outWidth - radius);
+        const badgeY = clamp((y1 + y2) / 2 + Math.cos(angle) * radius * 1.5, radius, canvasHeight - radius);
+        drawBadge(target, badgeX, badgeY, radius, color, String(marker.no));
+        return;
+      }
       strokeWithHalo(target, () => {
         target.beginPath();
         target.moveTo(x1, y1);
@@ -747,6 +838,7 @@ window.__ModuleLoader__.load({
       const [temp, setTemp] = React.useState(null);
       const [cropHistoryVersion, setCropHistoryVersion] = React.useState(0);
       const [contextMenu, setContextMenu] = React.useState(null);
+      const [mergeSelection, setMergeSelection] = React.useState([]);
 
       const svgRef = React.useRef(null);
       const stageRef = React.useRef(null);
@@ -813,6 +905,7 @@ window.__ModuleLoader__.load({
             name,
           });
           setMarkers([]);
+          setMergeSelection([]);
           historyRef.current = { past: [], future: [] };
           nextNumberRef.current = 1;
           colorCursorRef.current = 0;
@@ -867,6 +960,7 @@ window.__ModuleLoader__.load({
         const previous = history.past.pop();
         setMarkers(previous);
         setSelectedId(undefined);
+        setMergeSelection([]);
       }, []);
 
       const redo = React.useCallback(() => {
@@ -876,6 +970,7 @@ window.__ModuleLoader__.load({
         const next = history.future.pop();
         setMarkers(next);
         setSelectedId(undefined);
+        setMergeSelection([]);
       }, []);
 
       React.useEffect(() => {
@@ -911,8 +1006,9 @@ window.__ModuleLoader__.load({
             event.preventDefault();
             const id = selectedRef.current;
             pushHistory(markersRef.current);
-            setMarkers((previous) => previous.filter((marker) => marker.id !== id));
+            setMarkers(renumberMarkers(markersRef.current.filter((marker) => marker.id !== id)));
             setSelectedId(undefined);
+            setMergeSelection((previous) => previous.filter((candidate) => candidate !== id));
           }
         };
         window.addEventListener('keydown', onKeyDown);
@@ -958,14 +1054,15 @@ window.__ModuleLoader__.load({
       };
 
       const addMarker = (shape) => {
-        const number = nextNumberRef.current;
+        const id = nextNumberRef.current;
         nextNumberRef.current += 1;
         const color = MARKER_COLORS[colorCursorRef.current % MARKER_COLORS.length];
         colorCursorRef.current += 1;
         setColorIndex(colorCursorRef.current % MARKER_COLORS.length);
         const marker = {
-          id: number,
-          no: number,
+          id,
+          no: 0,
+          groupId: id,
           kind: shape.kind,
           color: color.id,
           x1: shape.x1,
@@ -975,8 +1072,63 @@ window.__ModuleLoader__.load({
           comment: '',
         };
         pushHistory(markersRef.current);
-        setMarkers([...markersRef.current, marker]);
-        setSelectedId(number);
+        setMarkers(renumberMarkers([...markersRef.current, marker]));
+        setSelectedId(id);
+      };
+
+      /** Delete one shape; the remaining groups are renumbered without gaps. */
+      const removeMarker = (id) => {
+        pushHistory(markersRef.current);
+        setMarkers(renumberMarkers(markersRef.current.filter((marker) => marker.id !== id)));
+        setSelectedId(undefined);
+        setMergeSelection((previous) => previous.filter((candidate) => candidate !== id));
+      };
+
+      /** Delete every shape of one group. */
+      const removeGroup = (groupId) => {
+        pushHistory(markersRef.current);
+        const removedIds = new Set(markersRef.current.filter((marker) => marker.groupId === groupId).map((marker) => marker.id));
+        setMarkers(renumberMarkers(markersRef.current.filter((marker) => marker.groupId !== groupId)));
+        setSelectedId(undefined);
+        setMergeSelection((previous) => previous.filter((candidate) => !removedIds.has(candidate)));
+      };
+
+      /** One comment is shared by every shape of the group. */
+      const updateGroupComment = (groupId, comment) => {
+        setMarkers((previous) => previous.map((marker) => (
+          marker.groupId === groupId ? { ...marker, comment } : marker
+        )));
+      };
+
+      const toggleMergeSelection = (id) => {
+        setMergeSelection((previous) => (previous.includes(id)
+          ? previous.filter((candidate) => candidate !== id)
+          : [...previous, id]));
+      };
+
+      /** Merge the checked shapes under one number, color, and comment. */
+      const mergeSelected = () => {
+        if (mergeSelection.length < 2) return;
+        const selected = markersRef.current.filter((marker) => mergeSelection.includes(marker.id));
+        if (selected.length < 2) return;
+        const target = selected[0];
+        pushHistory(markersRef.current);
+        setMarkers(renumberMarkers(markersRef.current.map((marker) => (
+          mergeSelection.includes(marker.id)
+            ? { ...marker, groupId: target.groupId, color: target.color, comment: target.comment }
+            : marker
+        ))));
+        setSelectedId(target.id);
+        setMergeSelection([]);
+      };
+
+      /** Turn every shape of a group into its own group. */
+      const ungroupGroup = (groupId) => {
+        pushHistory(markersRef.current);
+        setMarkers(renumberMarkers(markersRef.current.map((marker) => (
+          marker.groupId === groupId ? { ...marker, groupId: marker.id } : marker
+        ))));
+        setMergeSelection([]);
       };
 
       const onPointerDown = (event) => {
@@ -1063,7 +1215,7 @@ window.__ModuleLoader__.load({
           const width = Math.abs(shape.x2 - shape.x1);
           const height = Math.abs(shape.y2 - shape.y1);
           if (shape.kind === 'rect' && width < 6 && height < 6) return;
-          if (shape.kind === 'arrow' && Math.hypot(width, height) < 10) return;
+          if ((shape.kind === 'arrow' || shape.kind === 'ruler') && Math.hypot(width, height) < 10) return;
           addMarker(shape);
         }
         if (typeof event.currentTarget.releasePointerCapture === 'function') {
@@ -1090,6 +1242,7 @@ window.__ModuleLoader__.load({
       const selectedMarker = markers.find((marker) => marker.id === selectedId);
 
       const legendText = image === null ? '' : buildLegend('__PATH__', image, markers, quality, t);
+      const markerGroups = groupMarkers(markers);
 
       const handleDownload = () => {
         if (image === null) return;
@@ -1242,6 +1395,7 @@ window.__ModuleLoader__.load({
             name: image.name,
           });
           setMarkers([]);
+          setMergeSelection([]);
           historyRef.current = { past: [], future: [] };
           nextNumberRef.current = 1;
           colorCursorRef.current = 0;
@@ -1261,6 +1415,7 @@ window.__ModuleLoader__.load({
         if (previous === undefined) return;
         setImage(previous);
         setMarkers([]);
+        setMergeSelection([]);
         historyRef.current = { past: [], future: [] };
         nextNumberRef.current = 1;
         colorCursorRef.current = 0;
@@ -1329,9 +1484,11 @@ window.__ModuleLoader__.load({
           }
           return;
         }
+        const target = markersRef.current.find((marker) => marker.id === menu.markerId);
+        if (target === undefined) return;
         pushHistory(markersRef.current);
         setMarkers((previous) => previous.map((marker) => (
-          marker.id === menu.markerId ? { ...marker, color: color.id } : marker
+          marker.groupId === target.groupId ? { ...marker, color: color.id } : marker
         )));
         setSelectedId(menu.markerId);
       };
@@ -1355,13 +1512,13 @@ window.__ModuleLoader__.load({
         h('div', { className: 'sa-ctx-title' },
           current === undefined ? t('ctxNewMarker') : `${t('ctxMarker')} #${current.no}`),
         h('div', { className: 'sa-ctx-label' }, t('ctxType')),
-        h('div', { className: 'sa-ctx-row' },
-          ['point', 'rect', 'arrow'].map((kind) => h('button', {
+        h('div', { className: 'sa-ctx-row sa-ctx-types' },
+          ['point', 'rect', 'arrow', 'ruler'].map((kind) => h('button', {
             key: kind,
             type: 'button',
             className: currentKind === kind ? 'sa-ctx-item sa-active' : 'sa-ctx-item',
             onClick: () => applyContextKind(kind),
-          }, h(Icon, { name: kind, size: 14 }), t(kind === 'point' ? 'toolPoint' : kind === 'rect' ? 'toolRect' : 'toolArrow')))),
+          }, h(Icon, { name: kind, size: 14 }), t(kind === 'point' ? 'toolPoint' : kind === 'rect' ? 'toolRect' : kind === 'ruler' ? 'toolRuler' : 'toolArrow')))),
         h('div', { className: 'sa-ctx-label' }, t('ctxColor')),
         h('div', { className: 'sa-ctx-row sa-ctx-colors' },
           MARKER_COLORS.map((color) => h('button', {
@@ -1453,6 +1610,40 @@ window.__ModuleLoader__.load({
             badge(clamp(left, radius, image.width - radius), clamp(top, radius, image.height - radius)),
           ]);
         }
+        if (marker.kind === 'ruler') {
+          const dxr = marker.x2 - marker.x1;
+          const dyr = marker.y2 - marker.y1;
+          const angleR = Math.atan2(dyr, dxr);
+          const tick = Math.max(10, radius * 0.9);
+          const tickX = -Math.sin(angleR) * tick;
+          const tickY = Math.cos(angleR) * tick;
+          const strokeW = Math.max(2, image.width * 0.0026);
+          return h('g', { key: marker.id }, [
+            h('line', {
+              key: 'line',
+              x1: marker.x1,
+              y1: marker.y1,
+              x2: marker.x2,
+              y2: marker.y2,
+              stroke: color.value,
+              strokeWidth: strokeW,
+              strokeLinecap: 'round',
+              strokeDasharray: isSelected ? `${radius * 0.5} ${radius * 0.35}` : undefined,
+            }),
+            h('path', {
+              key: 'ticks',
+              d: `M ${marker.x1 - tickX} ${marker.y1 - tickY} L ${marker.x1 + tickX} ${marker.y1 + tickY} `
+                + `M ${marker.x2 - tickX} ${marker.y2 - tickY} L ${marker.x2 + tickX} ${marker.y2 + tickY}`,
+              stroke: color.value,
+              strokeWidth: strokeW,
+              strokeLinecap: 'round',
+            }),
+            badge(
+              clamp((marker.x1 + marker.x2) / 2 - Math.sin(angleR) * radius * 1.5, radius, image.width - radius),
+              clamp((marker.y1 + marker.y2) / 2 + Math.cos(angleR) * radius * 1.5, radius, image.height - radius),
+            ),
+          ]);
+        }
         const dx = marker.x2 - marker.x1;
         const dy = marker.y2 - marker.y1;
         const angle = Math.atan2(dy, dx);
@@ -1531,6 +1722,7 @@ window.__ModuleLoader__.load({
                   h(ToolButton, { active: tool === 'point', title: t('toolPoint'), name: 'point', onClick: () => setTool('point') }),
                   h(ToolButton, { active: tool === 'rect', title: t('toolRect'), name: 'rect', onClick: () => setTool('rect') }),
                   h(ToolButton, { active: tool === 'arrow', title: t('toolArrow'), name: 'arrow', onClick: () => setTool('arrow') }),
+                  h(ToolButton, { active: tool === 'ruler', title: t('toolRuler'), name: 'ruler', onClick: () => setTool('ruler') }),
                   h(ToolButton, { active: tool === 'crop', title: t('toolCrop'), name: 'crop', onClick: () => setTool('crop') })),
                 h('div', { className: 'sa-group' }, h('div', { className: 'sa-swatches' },
                   MARKER_COLORS.map((color, index) => h('button', {
@@ -1629,7 +1821,14 @@ window.__ModuleLoader__.load({
             h('aside', { className: landscape ? `sa-side sa-side-below${sideCollapsed ? ' sa-collapsed' : ''}` : 'sa-side' },
               h('div', { className: 'sa-side-head' },
                 t('markers'),
-                h('span', { className: 'sa-count' }, String(markers.length)),
+                h('span', { className: 'sa-count' }, String(markerGroups.length)),
+                mergeSelection.length >= 2
+                  ? h('button', {
+                    type: 'button',
+                    className: 'sa-btn sa-btn-small sa-merge',
+                    onClick: mergeSelected,
+                  }, t('merge').replace('{n}', String(mergeSelection.length)))
+                  : null,
                 landscape
                   ? h('button', {
                     type: 'button',
@@ -1638,44 +1837,71 @@ window.__ModuleLoader__.load({
                     onClick: () => setSideCollapsed((value) => !value),
                   }, sideCollapsed ? t('expand') : t('collapse'))
                   : null),
-              markers.length === 0
+              markers.length >= 2
+                ? h('div', { className: 'sa-group-hint' }, t('groupHint'))
+                : null,
+              markerGroups.length === 0
                 ? h('div', { className: 'sa-empty' }, t('noMarkers'))
                 : h('div', { className: 'sa-marker-list' },
-                  markers.map((marker) => {
-                    const color = colorById(marker.color);
+                  markerGroups.map((group) => {
+                    const leader = group.markers[0];
+                    const color = colorById(leader.color);
+                    const memberSelected = group.markers.some((marker) => marker.id === selectedId);
                     return h('div', {
-                      key: marker.id,
-                      className: marker.id === selectedId ? 'sa-marker sa-selected' : 'sa-marker',
+                      key: group.id,
+                      className: memberSelected ? 'sa-marker sa-selected' : 'sa-marker',
                     },
                     h('span', {
                       className: 'sa-badge',
                       style: { background: color.value, color: color.text },
-                    }, String(marker.no)),
+                    }, String(leader.no)),
                     h('div', { className: 'sa-marker-body' },
                       h('div', { className: 'sa-marker-meta' },
-                        `${t(kindKey(marker.kind))} · ${t(COLOR_KEYS[marker.color])} · ${markerCoordinates(marker, image.width, image.height)}`),
+                        group.markers.length === 1
+                          ? t(COLOR_KEYS[leader.color])
+                          : `${t('groupShapes').replace('{n}', String(group.markers.length))} · ${t(COLOR_KEYS[leader.color])}`),
+                      h('div', { className: 'sa-group-chips' },
+                        group.markers.map((marker) => h('span', { key: marker.id, className: 'sa-chip' },
+                          h('input', {
+                            type: 'checkbox',
+                            checked: mergeSelection.includes(marker.id),
+                            onChange: () => toggleMergeSelection(marker.id),
+                            'aria-label': `${t('markers')} #${marker.no}`,
+                          }),
+                          h('button', {
+                            type: 'button',
+                            className: 'sa-chip-label',
+                            title: t(kindKey(marker.kind)),
+                            onClick: () => setSelectedId(marker.id),
+                          }, `${t(kindKey(marker.kind))} ${markerCoordinates(marker, image.width, image.height)}`),
+                          h('button', {
+                            type: 'button',
+                            className: 'sa-chip-del',
+                            title: t('deleteMarker'),
+                            'aria-label': t('deleteMarker'),
+                            onClick: () => removeMarker(marker.id),
+                          }, '×')))),
                       h('textarea', {
-                        value: marker.comment,
+                        value: leader.comment,
                         maxLength: MAX_COMMENT,
                         placeholder: t('commentPlaceholder'),
-                        onFocus: () => setSelectedId(marker.id),
-                        onChange: (event) => {
-                          const value = event.target.value;
-                          setMarkers((previous) => previous.map((candidate) => (
-                            candidate.id === marker.id ? { ...candidate, comment: value } : candidate
-                          )));
-                        },
-                      })),
+                        onFocus: () => setSelectedId(leader.id),
+                        onChange: (event) => updateGroupComment(group.id, event.target.value),
+                      }),
+                      group.markers.length > 1
+                        ? h('div', { className: 'sa-group-actions' },
+                          h('button', {
+                            type: 'button',
+                            className: 'sa-btn sa-btn-small',
+                            onClick: () => ungroupGroup(group.id),
+                          }, t('ungroup')))
+                        : null),
                     h('button', {
                       type: 'button',
                       className: 'sa-delete',
-                      title: t('deleteMarker'),
-                      'aria-label': t('deleteMarker'),
-                      onClick: () => {
-                        pushHistory(markersRef.current);
-                        setMarkers((previous) => previous.filter((candidate) => candidate.id !== marker.id));
-                        setSelectedId(undefined);
-                      },
+                      title: group.markers.length > 1 ? t('deleteGroup') : t('deleteMarker'),
+                      'aria-label': group.markers.length > 1 ? t('deleteGroup') : t('deleteMarker'),
+                      onClick: () => (group.markers.length > 1 ? removeGroup(group.id) : removeMarker(leader.id)),
                     }, h(Icon, { name: 'trash', size: 14 })));
                   })),
               h('details', {
@@ -1750,12 +1976,15 @@ window.__ModuleLoader__.load({
         return lines.join('\n');
       }
       lines.push(t('legendCoords'));
-      for (const marker of markers) {
-        const color = t(COLOR_KEYS[marker.color] ?? 'colorRed');
-        const kind = t(kindKey(marker.kind));
-        const comment = String(marker.comment ?? '').replace(/\s+/g, ' ').trim();
+      for (const group of groupMarkers(markers)) {
+        const leader = group.markers[0];
+        const color = t(COLOR_KEYS[leader.color] ?? 'colorRed');
+        const comment = String(leader.comment ?? '').replace(/\s+/g, ' ').trim();
         const suffix = comment === '' ? '' : `: ${comment}`;
-        lines.push(`#${marker.no} ${color} ${kind} ${markerCoordinates(marker, image.width, image.height)}${suffix}`);
+        const parts = group.markers.map((marker) => (
+          `${t(kindKey(marker.kind))} ${markerCoordinates(marker, image.width, image.height)}`
+        ));
+        lines.push(`#${leader.no} ${color} ${parts.join(' + ')}${suffix}`);
       }
       return lines.join('\n');
     }
