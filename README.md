@@ -16,6 +16,23 @@ dropped, or picked from disk, and marked up with:
   (for example, three arrows that carry one message). Tick the markers in the list
   and press **Merge**; **Ungroup** splits them again;
 - numbers stay sequential: deleting a marker renumbers the remaining ones without gaps;
+- canvas multi-select: marquee or Shift+click selects several markers, which can be
+  moved, deleted, grouped, and duplicated together (Ctrl+D); number badges spread
+  out automatically so they do not overlap;
+- line styles: solid/dashed, one/two arrow heads, thin/normal/thick, straight/curved
+  — for the next marker and for the selected ones (right-click menu);
+- the **Hide** tool pixelates a selected area to remove passwords and personal data
+  from the screenshot before sending it;
+- annotations are saved in the browser per image hash and restored when the same
+  screenshot is pasted again;
+- keyboard shortcuts: M/P/R/A/L/X pick tools, Delete removes the selection,
+  Ctrl+Z / Ctrl+Shift+Z undo/redo, Ctrl+D duplicates, Esc clears the selection;
+- mouse-wheel zoom to the cursor, pan with Space or the middle mouse button,
+  Shift+wheel scrolls horizontally;
+- export as PNG, JPEG, or WebP (picker at the bottom); **Text only** sends the
+  coordinates and comments without the image;
+- batch annotation: **Add to queue** keeps the current screenshot, the next one can
+  be pasted, and all of them are sent in one message;
 - a ruler marker for alignment lines: the **Ruler** tool draws a line with end ticks; holding **Shift** while drawing snaps the angle to 10° steps (like Photoshop);
 - right-click on the image opens a menu for the marker type and color; right-click
   an existing marker changes its shape and color;

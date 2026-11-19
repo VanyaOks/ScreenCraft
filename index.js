@@ -30,8 +30,24 @@ const BODY_LIMIT = 24 * 1024 * 1024;
 const IMAGE_LIMIT = 16 * 1024 * 1024;
 const KEEP_MS = 7 * 24 * 60 * 60 * 1000;
 const KEEP_FILES = 200;
-const DATA_URL = /^data:image\/png;base64,([A-Za-z0-9+/]+={0,2})$/;
+const DATA_URL = /^data:image\/(png|jpeg|webp);base64,([A-Za-z0-9+/]+={0,2})$/;
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const JPEG_SIGNATURE = Buffer.from([0xff, 0xd8, 0xff]);
+const WEBP_SIGNATURE = Buffer.from('RIFF');
+const FORMAT_EXTENSION = Object.freeze({ png: 'png', jpeg: 'jpg', webp: 'webp' });
+const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp']);
+
+/** Whether the decoded bytes start with the signature of the declared format. */
+function hasSignature(format, bytes) {
+  if (format === 'png') return bytes.subarray(0, 8).equals(PNG_SIGNATURE);
+  if (format === 'jpeg') return bytes.length > 3 && bytes.subarray(0, 3).equals(JPEG_SIGNATURE);
+  if (format === 'webp') {
+    return bytes.length > 12
+      && bytes.subarray(0, 4).equals(WEBP_SIGNATURE)
+      && bytes.subarray(8, 12).toString('ascii') === 'WEBP';
+  }
+  return false;
+}
 
 /** One JSON answer for the browser half. */
 function sendJson(response, status, body) {
@@ -123,7 +139,7 @@ async function prune(directory) {
     const names = await readdir(directory);
     const files = [];
     for (const entry of names) {
-      if (!entry.endsWith('.png')) continue;
+      if (!IMAGE_EXTENSIONS.has(path.extname(entry).toLowerCase())) continue;
       const full = path.join(directory, entry);
       const stats = await stat(full).catch(() => undefined);
       if (stats !== undefined && stats.isFile()) files.push({ full, mtime: stats.mtimeMs });
@@ -170,16 +186,17 @@ async function handleSave(ctx, request, response) {
   const dataUrl = typeof body?.dataUrl === 'string' ? body.dataUrl : '';
   const match = DATA_URL.exec(dataUrl);
   if (match === null) {
-    sendJson(response, 400, { error: 'ожидался PNG в data URL' });
+    sendJson(response, 400, { error: 'ожидался PNG, JPEG или WebP в data URL' });
     return;
   }
-  const bytes = Buffer.from(match[1], 'base64');
+  const format = match[1];
+  const bytes = Buffer.from(match[2], 'base64');
   if (bytes.length === 0 || bytes.length > IMAGE_LIMIT) {
     sendJson(response, 400, { error: 'недопустимый размер изображения' });
     return;
   }
-  if (!bytes.subarray(0, 8).equals(PNG_SIGNATURE)) {
-    sendJson(response, 400, { error: 'данные не являются PNG' });
+  if (!hasSignature(format, bytes)) {
+    sendJson(response, 400, { error: 'данные не соответствуют формату изображения' });
     return;
   }
   const sessionId = typeof body?.sessionId === 'string' ? body.sessionId : '';
@@ -187,11 +204,15 @@ async function handleSave(ctx, request, response) {
     const baseDirectory = await resolveSessionDirectory(ctx, sessionId);
     const directory = path.join(baseDirectory, '.dsh', 'annotations');
     await mkdir(directory, { recursive: true });
-    const filename = `annotation-${formatStamp(new Date())}-${Math.random().toString(16).slice(2, 6)}.png`;
+    const filename = `annotation-${formatStamp(new Date())}-${Math.random().toString(16).slice(2, 6)}.${FORMAT_EXTENSION[format]}`;
     const file = path.join(directory, filename);
     await writeFile(file, bytes);
-    const width = bytes.readUInt32BE(16);
-    const height = bytes.readUInt32BE(20);
+    const width = Number.isInteger(body?.width) && body.width > 0
+      ? Math.min(100000, body.width)
+      : (format === 'png' ? bytes.readUInt32BE(16) : 0);
+    const height = Number.isInteger(body?.height) && body.height > 0
+      ? Math.min(100000, body.height)
+      : (format === 'png' ? bytes.readUInt32BE(20) : 0);
     const relativePath = path.relative(baseDirectory, file).split(path.sep).join('/');
     void prune(directory);
     sendJson(response, 200, { path: relativePath, bytes: bytes.length, width, height });

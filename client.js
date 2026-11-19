@@ -23,7 +23,7 @@ window.__ModuleLoader__.load({
     const SAVE_ROUTE = '/screenshot-annotator/save';
     const TOKEN_DIVISOR = 750;
     const MAX_COMMENT = 400;
-    const EDITOR_VERSION = '0.5.0';
+    const EDITOR_VERSION = '0.6.0';
 
     /* ------------------------------------------------------------------ */
     /* Shared state                                                        */
@@ -129,6 +129,139 @@ window.__ModuleLoader__.load({
       if (length === 0) return point;
       const angle = Math.round(Math.atan2(dy, dx) / step) * step;
       return { x: start.x + Math.cos(angle) * length, y: start.y + Math.sin(angle) * length };
+    }
+
+    /** Export formats the editor can save. */
+    const EXPORT_FORMATS = Object.freeze({
+      png: { mime: 'image/png', ext: 'png', label: 'PNG' },
+      jpeg: { mime: 'image/jpeg', ext: 'jpg', label: 'JPEG' },
+      webp: { mime: 'image/webp', ext: 'webp', label: 'WebP' },
+    });
+
+    /** Quadratic control point for a curved arrow (`curve` is -1…1). */
+    function arrowControlPoint(marker) {
+      const dx = marker.x2 - marker.x1;
+      const dy = marker.y2 - marker.y1;
+      const length = Math.hypot(dx, dy) || 1;
+      const offset = length * 0.5 * (marker.curve ?? 0);
+      return {
+        x: (marker.x1 + marker.x2) / 2 - (dy / length) * offset,
+        y: (marker.y1 + marker.y2) / 2 + (dx / length) * offset,
+      };
+    }
+
+    function quadraticPoint(start, control, end, t) {
+      const mt = 1 - t;
+      return {
+        x: mt * mt * start.x + 2 * mt * t * control.x + t * t * end.x,
+        y: mt * mt * start.y + 2 * mt * t * control.y + t * t * end.y,
+      };
+    }
+
+    function distanceToSegment(point, start, end) {
+      const dx = end.x - start.x;
+      const dy = end.y - start.y;
+      const lengthSq = dx * dx + dy * dy;
+      const ratio = lengthSq === 0 ? 0 : clamp(((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSq, 0, 1);
+      return Math.hypot(point.x - (start.x + ratio * dx), point.y - (start.y + ratio * dy));
+    }
+
+    /** Direction of an arrow at its head. */
+    function arrowHeadAngle(marker, control) {
+      return Math.atan2(marker.y2 - control.y, marker.x2 - control.x);
+    }
+
+    /** Preferred anchor of a marker's number badge. */
+    function badgeBase(marker, radius) {
+      if (marker.kind === 'point') return { x: marker.x1, y: marker.y1 };
+      if (marker.kind === 'rect') {
+        return { x: Math.min(marker.x1, marker.x2), y: Math.min(marker.y1, marker.y2) };
+      }
+      if (marker.kind === 'ruler') {
+        const dx = marker.x2 - marker.x1;
+        const dy = marker.y2 - marker.y1;
+        const length = Math.hypot(dx, dy) || 1;
+        return {
+          x: (marker.x1 + marker.x2) / 2 - (dy / length) * radius * 1.5,
+          y: (marker.y1 + marker.y2) / 2 + (dx / length) * radius * 1.5,
+        };
+      }
+      const control = arrowControlPoint(marker);
+      const angle = arrowHeadAngle(marker, control);
+      return {
+        x: marker.x2 + Math.cos(angle + Math.PI / 2) * radius * 1.25,
+        y: marker.y2 + Math.sin(angle + Math.PI / 2) * radius * 1.25,
+      };
+    }
+
+    /** Spread number badges so they do not overlap each other. */
+    function computeBadgePositions(markers, image, radius) {
+      const positions = new Map();
+      const placed = [];
+      const spacing = radius * 2.3;
+      for (const marker of markers) {
+        const base = badgeBase(marker, radius);
+        let best = base;
+        let bestOverlap = Infinity;
+        for (let ring = 0; ring < 4; ring += 1) {
+          const distance = ring === 0 ? 0 : radius * 1.9 * ring;
+          const steps = ring === 0 ? 1 : 10;
+          for (let step = 0; step < steps; step += 1) {
+            const angle = (step / steps) * Math.PI * 2;
+            const candidate = {
+              x: clamp(base.x + Math.cos(angle) * distance, radius, image.width - radius),
+              y: clamp(base.y + Math.sin(angle) * distance, radius, image.height - radius),
+            };
+            let overlap = 0;
+            for (const other of placed) {
+              const distanceToOther = Math.hypot(candidate.x - other.x, candidate.y - other.y);
+              if (distanceToOther < spacing) overlap += spacing - distanceToOther;
+            }
+            if (overlap < bestOverlap) {
+              bestOverlap = overlap;
+              best = candidate;
+            }
+            if (overlap === 0) break;
+          }
+          if (bestOverlap === 0) break;
+        }
+        positions.set(marker.id, best);
+        placed.push(best);
+      }
+      return positions;
+    }
+
+    /** SHA-256 of the pasted file, used as the annotation storage key. */
+    async function hashFile(file) {
+      try {
+        const buffer = await file.arrayBuffer();
+        if (globalThis.crypto?.subtle === undefined) return undefined;
+        const digest = await globalThis.crypto.subtle.digest('SHA-256', buffer);
+        return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+      } catch {
+        return undefined;
+      }
+    }
+
+    const STORAGE_KEY = 'screenCraft.annotations.v1';
+    const STORAGE_LIMIT = 80;
+
+    function readAnnotationStorage() {
+      try {
+        const raw = window.localStorage.getItem(STORAGE_KEY);
+        const parsed = raw === null ? {} : JSON.parse(raw);
+        return parsed !== null && typeof parsed === 'object' ? parsed : {};
+      } catch {
+        return {};
+      }
+    }
+
+    function writeAnnotationStorage(map) {
+      try {
+        window.localStorage.setItem(STORAGE_KEY, JSON.stringify(map));
+      } catch {
+        // Storage can be full or disabled; persistence is best effort.
+      }
     }
 
     const colorById = (id) => MARKER_COLORS.find((color) => color.id === id) ?? MARKER_COLORS[0];
@@ -248,6 +381,31 @@ window.__ModuleLoader__.load({
       toolArrow: 'Стрелка',
       toolRuler: 'Линейка',
       toolCrop: 'Обрезать',
+      toolRedact: 'Скрыть',
+      format: 'Формат',
+      textOnly: 'Только текст',
+      batchAdd: 'В очередь',
+      batchCount: 'В очереди: {n}',
+      batchClear: 'Очистить',
+      batchAdded: 'Добавлено в очередь: {n}. Вставьте следующий скриншот или нажмите «Вставить в чат».',
+      annotationsRestored: 'Аннотации восстановлены',
+      legendTextOnly: 'Только текст, без изображения (координаты — % от ширины×высоты):',
+      legendBatch: 'Скриншоты с метками ({n}):',
+      itemText: 'без изображения',
+      styleLine: 'Линия',
+      styleSolid: 'Обычная',
+      styleDashed: 'Пунктир',
+      styleHeads: 'Наконечники',
+      styleOneHead: 'Один',
+      styleTwoHeads: 'Два',
+      styleWeight: 'Толщина',
+      styleThin: 'Тонкая',
+      styleNormal: 'Обычная',
+      styleThick: 'Толстая',
+      styleShape: 'Форма',
+      styleStraight: 'Прямая',
+      styleCurved: 'Дуга',
+      redactDone: 'Область скрыта (пикселизация)',
       merge: 'Объединить ({n})',
       ungroup: 'Разъединить',
       deleteGroup: 'Удалить группу',
@@ -336,6 +494,31 @@ window.__ModuleLoader__.load({
       toolArrow: 'Arrow',
       toolRuler: 'Ruler',
       toolCrop: 'Crop',
+      toolRedact: 'Hide',
+      format: 'Format',
+      textOnly: 'Text only',
+      batchAdd: 'Add to queue',
+      batchCount: 'Queued: {n}',
+      batchClear: 'Clear',
+      batchAdded: 'Added to the queue: {n}. Paste the next screenshot or press Insert into chat.',
+      annotationsRestored: 'Annotations restored',
+      legendTextOnly: 'Text only, no image (coordinates are % of width×height):',
+      legendBatch: 'Annotated screenshots ({n}):',
+      itemText: 'no image',
+      styleLine: 'Line',
+      styleSolid: 'Solid',
+      styleDashed: 'Dashed',
+      styleHeads: 'Heads',
+      styleOneHead: 'One',
+      styleTwoHeads: 'Two',
+      styleWeight: 'Weight',
+      styleThin: 'Thin',
+      styleNormal: 'Normal',
+      styleThick: 'Thick',
+      styleShape: 'Shape',
+      styleStraight: 'Straight',
+      styleCurved: 'Curved',
+      redactDone: 'Area hidden (pixelated)',
       merge: 'Merge ({n})',
       ungroup: 'Ungroup',
       deleteGroup: 'Delete group',
@@ -431,6 +614,8 @@ window.__ModuleLoader__.load({
           [h('path', { key: 'l', d: 'M4 19L19 5' }), h('path', { key: 'a', d: 'M12 5h7v7' })],
         ] : name === 'ruler' ? [
           [h('path', { key: 'l', d: 'M4 20L20 6' }), h('path', { key: 'a', d: 'M4 20l-1.5-1.5M20 6l1.5 1.5' }), h('path', { key: 'b', d: 'M8 16l-1.5-1.5M12 12l-1.5-1.5M16 8l-1.5-1.5' })],
+        ] : name === 'redact' ? [
+          [h('rect', { key: 'r', x: 4, y: 6, width: 16, height: 12, rx: 2 }), h('path', { key: 'p', d: 'M8 11h.01M12 11h.01M16 11h.01M8 14h.01M12 14h.01M16 14h.01' })],
         ] : name === 'crop' ? [
           [h('path', { key: 'a', d: 'M7 3v14h14' }), h('path', { key: 'b', d: 'M3 7h14v14' })],
         ] : name === 'undo' ? [
@@ -474,7 +659,7 @@ window.__ModuleLoader__.load({
 .sa-head p{margin:3px 0 0;font-size:12px;line-height:1.45;color:var(--dsw-alias-label-secondary,#9aa1af);max-width:760px}
 .sa-head .sa-close{margin-left:8px}
 .sa-version{margin-left:auto;align-self:flex-start;font-size:10px;line-height:19px;color:var(--dsw-alias-label-secondary,#8b93a3);opacity:.75;user-select:none}
-.sa-ctx{position:fixed;z-index:2147483001;display:flex;flex-direction:column;gap:8px;min-width:230px;max-width:270px;padding:10px;border:1px solid var(--dsw-alias-border-l1,rgba(255,255,255,.16));border-radius:12px;background:var(--dsw-alias-bg-layer-1,#171a21);box-shadow:0 16px 44px rgba(0,0,0,.55)}
+.sa-ctx{position:fixed;z-index:2147483001;display:flex;flex-direction:column;gap:8px;min-width:230px;max-width:270px;max-height:min(86vh,640px);overflow:auto;padding:10px;border:1px solid var(--dsw-alias-border-l1,rgba(255,255,255,.16));border-radius:12px;background:var(--dsw-alias-bg-layer-1,#171a21);box-shadow:0 16px 44px rgba(0,0,0,.55)}
 .sa-ctx-title{font-size:12px;font-weight:650;color:var(--dsw-alias-label-primary,#e8eaf0)}
 .sa-ctx-label{font-size:10px;letter-spacing:.4px;text-transform:uppercase;color:var(--dsw-alias-label-secondary,#8b93a3)}
 .sa-ctx-row{display:flex;gap:6px}
@@ -558,7 +743,11 @@ window.__ModuleLoader__.load({
 .sa-legend summary{cursor:pointer;font-size:12px;color:var(--dsw-alias-label-secondary,#9aa1af);list-style:none}
 .sa-legend summary::-webkit-details-marker{display:none}
 .sa-legend pre{margin:8px 0 0;max-height:160px;overflow:auto;padding:8px;border-radius:8px;background:var(--dsw-alias-bg-layer-2,rgba(255,255,255,.04));font:11px/1.5 ui-monospace,Consolas,"Cascadia Mono",monospace;white-space:pre-wrap;word-break:break-word;color:var(--dsw-alias-label-primary,#dfe3ea)}
-.sa-foot{display:flex;align-items:center;gap:12px;padding:12px 16px;border-top:1px solid var(--dsw-alias-border-l1,rgba(255,255,255,.1));background:var(--dsw-alias-bg-layer-2,rgba(255,255,255,.03))}
+.sa-foot{display:flex;align-items:center;gap:12px;padding:12px 16px;border-top:1px solid var(--dsw-alias-border-l1,rgba(255,255,255,.1));background:var(--dsw-alias-bg-layer-2,rgba(255,255,255,.03));flex-wrap:wrap}
+.sa-foot-field{display:inline-flex;align-items:center;gap:5px;font-size:11px;color:var(--dsw-alias-label-secondary,#9aa1af)}
+.sa-foot-field select{height:26px;padding:0 5px;border:1px solid var(--dsw-alias-border-l1,rgba(255,255,255,.16));border-radius:6px;background:var(--dsw-alias-bg-layer-1,#12141a);color:var(--dsw-alias-label-primary,#e8eaf0);font:inherit;font-size:11px}
+.sa-foot-check{display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--dsw-alias-label-secondary,#9aa1af);cursor:pointer;white-space:nowrap}
+.sa-foot-check input{width:12px;height:12px;margin:0;accent-color:var(--dsw-alias-accent,#4d6bfe)}
 .sa-foot-info{font-size:12px;line-height:1.4;color:var(--dsw-alias-label-secondary,#9aa1af)}
 .sa-notice{flex:1;min-width:0;font-size:12px;line-height:1.4;color:#f2b84b;overflow:hidden;text-overflow:ellipsis}
 .sa-actions{display:flex;align-items:center;gap:8px;margin-left:auto}
@@ -596,10 +785,11 @@ window.__ModuleLoader__.load({
       target.restore();
     }
 
-    function strokeWithHalo(target, drawPath, color, width) {
+    function strokeWithHalo(target, drawPath, color, width, dashed) {
       target.save();
       target.lineCap = 'round';
       target.lineJoin = 'round';
+      target.setLineDash(dashed === true ? [width * 3.2, width * 2.4] : []);
       drawPath();
       target.globalAlpha = 0.9;
       target.lineWidth = width * 2.6;
@@ -612,42 +802,70 @@ window.__ModuleLoader__.load({
       target.restore();
     }
 
+    function drawArrowHead(target, x, y, angle, size, color, lineWidth) {
+      target.save();
+      target.beginPath();
+      target.moveTo(x, y);
+      target.lineTo(x - size * Math.cos(angle - Math.PI / 7), y - size * Math.sin(angle - Math.PI / 7));
+      target.lineTo(x - size * Math.cos(angle + Math.PI / 7), y - size * Math.sin(angle + Math.PI / 7));
+      target.closePath();
+      target.fillStyle = color.value;
+      target.fill();
+      target.strokeStyle = 'rgba(255,255,255,0.92)';
+      target.lineWidth = Math.max(1.5, lineWidth * 0.9);
+      target.stroke();
+      target.restore();
+    }
+
     /** Draw one marker into a canvas at the exported scale. */
-    function drawMarker(target, marker, image, outWidth) {
+    function drawMarker(target, marker, image, outWidth, badgePosition) {
       const scale = outWidth / image.width;
       const color = colorById(marker.color);
       const radius = badgeRadiusFor(image) * scale;
-      const x1 = marker.x1 * scale;
-      const y1 = marker.y1 * scale;
-      const x2 = marker.x2 * scale;
-      const y2 = marker.y2 * scale;
+      const weight = marker.weight === 1 ? 0.7 : marker.weight === 3 ? 1.5 : 1;
+      const lineWidth = Math.max(1.5, outWidth * 0.0026 * weight);
+      const dashed = marker.dashed === true;
       const canvasHeight = image.height * scale;
+      const sx = (value) => value * scale;
+      const drawBadgeAt = () => {
+        const position = badgePosition ?? badgeBase(marker, badgeRadiusFor(image));
+        drawBadge(
+          target,
+          clamp(position.x * scale, radius, outWidth - radius),
+          clamp(position.y * scale, radius, canvasHeight - radius),
+          radius,
+          color,
+          String(marker.no),
+        );
+      };
       if (marker.kind === 'point') {
-        drawBadge(target, clamp(x1, radius, outWidth - radius), clamp(y1, radius, canvasHeight - radius), radius, color, String(marker.no));
+        drawBadgeAt();
         return;
       }
       if (marker.kind === 'rect') {
-        const left = Math.min(x1, x2);
-        const top = Math.min(y1, y2);
-        const width = Math.abs(x2 - x1);
-        const height = Math.abs(y2 - y1);
+        const left = Math.min(sx(marker.x1), sx(marker.x2));
+        const top = Math.min(sx(marker.y1), sx(marker.y2));
+        const width = Math.abs(sx(marker.x2) - sx(marker.x1));
+        const height = Math.abs(sx(marker.y2) - sx(marker.y1));
         target.save();
         target.globalAlpha = 0.16;
         target.fillStyle = color.value;
         target.fillRect(left, top, width, height);
         target.restore();
-        const lineWidth = Math.max(2, outWidth * 0.0026);
-        strokeWithHalo(target, () => target.strokeRect(left, top, width, height), color, lineWidth);
-        drawBadge(target, clamp(left, radius, outWidth - radius), clamp(top, radius, canvasHeight - radius), radius, color, String(marker.no));
+        strokeWithHalo(target, () => target.strokeRect(left, top, width, height), color, lineWidth, dashed);
+        drawBadgeAt();
         return;
       }
-      const lineWidth = Math.max(2, outWidth * 0.0026);
       if (marker.kind === 'ruler') {
+        const x1 = sx(marker.x1);
+        const y1 = sx(marker.y1);
+        const x2 = sx(marker.x2);
+        const y2 = sx(marker.y2);
         strokeWithHalo(target, () => {
           target.beginPath();
           target.moveTo(x1, y1);
           target.lineTo(x2, y2);
-        }, color, lineWidth);
+        }, color, lineWidth, dashed);
         const angle = Math.atan2(y2 - y1, x2 - x1);
         const tick = Math.max(10, radius * 0.9);
         const tickX = -Math.sin(angle) * tick;
@@ -658,38 +876,33 @@ window.__ModuleLoader__.load({
           target.lineTo(x1 + tickX, y1 + tickY);
           target.moveTo(x2 - tickX, y2 - tickY);
           target.lineTo(x2 + tickX, y2 + tickY);
-        }, color, lineWidth);
-        const badgeX = clamp((x1 + x2) / 2 - Math.sin(angle) * radius * 1.5, radius, outWidth - radius);
-        const badgeY = clamp((y1 + y2) / 2 + Math.cos(angle) * radius * 1.5, radius, canvasHeight - radius);
-        drawBadge(target, badgeX, badgeY, radius, color, String(marker.no));
+        }, color, lineWidth, dashed);
+        drawBadgeAt();
         return;
       }
+      const start = { x: sx(marker.x1), y: sx(marker.y1) };
+      const end = { x: sx(marker.x2), y: sx(marker.y2) };
+      const controlNatural = arrowControlPoint(marker);
+      const control = { x: controlNatural.x * scale, y: controlNatural.y * scale };
+      const curved = (marker.curve ?? 0) !== 0;
       strokeWithHalo(target, () => {
         target.beginPath();
-        target.moveTo(x1, y1);
-        target.lineTo(x2, y2);
-      }, color, lineWidth);
-      const angle = Math.atan2(y2 - y1, x2 - x1);
-      const head = Math.max(10, radius * 1.15);
-      target.save();
-      target.beginPath();
-      target.moveTo(x2, y2);
-      target.lineTo(x2 - head * Math.cos(angle - Math.PI / 7), y2 - head * Math.sin(angle - Math.PI / 7));
-      target.lineTo(x2 - head * Math.cos(angle + Math.PI / 7), y2 - head * Math.sin(angle + Math.PI / 7));
-      target.closePath();
-      target.fillStyle = color.value;
-      target.fill();
-      target.strokeStyle = 'rgba(255,255,255,0.92)';
-      target.lineWidth = Math.max(1.5, lineWidth * 0.9);
-      target.stroke();
-      target.restore();
-      const badgeX = clamp(x2 + Math.cos(angle + Math.PI / 2) * radius * 1.15, radius, outWidth - radius);
-      const badgeY = clamp(y2 + Math.sin(angle + Math.PI / 2) * radius * 1.15, radius, canvasHeight - radius);
-      drawBadge(target, badgeX, badgeY, radius, color, String(marker.no));
+        target.moveTo(start.x, start.y);
+        if (curved) target.quadraticCurveTo(control.x, control.y, end.x, end.y);
+        else target.lineTo(end.x, end.y);
+      }, color, lineWidth, dashed);
+      const angle = Math.atan2(end.y - control.y, end.x - control.x);
+      const headSize = Math.max(10, radius * 1.15);
+      drawArrowHead(target, end.x, end.y, angle, headSize, color, lineWidth);
+      if (marker.doubleHead === true) {
+        const startAngle = curved ? Math.atan2(start.y - control.y, start.x - control.x) : angle + Math.PI;
+        drawArrowHead(target, start.x, start.y, startAngle, headSize, color, lineWidth);
+      }
+      drawBadgeAt();
     }
 
-    /** Render the annotated image and return a PNG data URL. */
-    function renderExport(image, markers, longEdge) {
+    /** Render the annotated image and return its data URL and pixel size. */
+    function renderExport(image, markers, longEdge, format = 'png') {
       const scale = longEdge > 0 ? Math.min(1, longEdge / Math.max(image.width, image.height)) : 1;
       const width = Math.max(1, Math.round(image.width * scale));
       const height = Math.max(1, Math.round(image.height * scale));
@@ -698,9 +911,21 @@ window.__ModuleLoader__.load({
       canvas.height = height;
       const target = canvas.getContext('2d');
       if (target === null) throw new Error('canvas 2d context is unavailable');
+      if (format === 'jpeg') {
+        target.fillStyle = '#ffffff';
+        target.fillRect(0, 0, width, height);
+      }
       target.drawImage(image.element, 0, 0, width, height);
-      for (const marker of markers) drawMarker(target, marker, image, width);
-      return canvas.toDataURL('image/png');
+      const badgePositions = computeBadgePositions(markers, image, badgeRadiusFor(image));
+      for (const marker of markers) drawMarker(target, marker, image, width, badgePositions.get(marker.id));
+      const meta = EXPORT_FORMATS[format] ?? EXPORT_FORMATS.png;
+      return {
+        dataUrl: canvas.toDataURL(meta.mime, format === 'png' ? undefined : 0.9),
+        width,
+        height,
+        mime: meta.mime,
+        ext: meta.ext,
+      };
     }
 
     /** Estimated image tokens for the chosen export size. */
@@ -890,9 +1115,23 @@ window.__ModuleLoader__.load({
       const [cropHistoryVersion, setCropHistoryVersion] = React.useState(0);
       const [contextMenu, setContextMenu] = React.useState(null);
       const [mergeSelection, setMergeSelection] = React.useState([]);
+      const [format, setFormat] = React.useState('png');
+      const [textOnly, setTextOnly] = React.useState(false);
+      const [batch, setBatch] = React.useState([]);
+      const [styleDefaults, setStyleDefaults] = React.useState({
+        dashed: false,
+        doubleHead: false,
+        weight: 2,
+        curve: 0,
+      });
+      const [imageKey, setImageKey] = React.useState(undefined);
+      const [spaceHeld, setSpaceHeld] = React.useState(false);
 
       const svgRef = React.useRef(null);
       const stageRef = React.useRef(null);
+      const stageInnerRef = React.useRef(null);
+      const spacePressedRef = React.useRef(false);
+      const panRef = React.useRef(undefined);
       const manualZoomRef = React.useRef(false);
       const fileRef = React.useRef(null);
       const objectUrlsRef = React.useRef(new Set());
@@ -902,12 +1141,14 @@ window.__ModuleLoader__.load({
       const nextNumberRef = React.useRef(1);
       const colorCursorRef = React.useRef(0);
       const markersRef = React.useRef(markers);
+      const batchRef = React.useRef(batch);
       const selectedRef = React.useRef(selectedId);
       const loadFileRef = React.useRef(() => {});
       const closedRef = React.useRef(false);
 
       markersRef.current = markers;
       selectedRef.current = selectedId;
+      batchRef.current = batch;
 
       /** Replace the working image and clear markers and history. */
       const loadFile = React.useCallback((file) => {
@@ -918,6 +1159,7 @@ window.__ModuleLoader__.load({
         }
         const url = URL.createObjectURL(file);
         objectUrlsRef.current.add(url);
+        const hashPromise = hashFile(file);
         const element = new Image();
         element.onload = async () => {
           const name = typeof file.name === 'string' && file.name !== '' ? file.name : 'screenshot.png';
@@ -948,6 +1190,9 @@ window.__ModuleLoader__.load({
           } catch {
             // A failed trim keeps the original image.
           }
+          const hash = await hashPromise;
+          const storageKey = hash === undefined ? undefined : `${hash}:${finalWidth}x${finalHeight}`;
+          setImageKey(storageKey);
           setImage({
             element: finalElement,
             url: finalUrl,
@@ -955,15 +1200,30 @@ window.__ModuleLoader__.load({
             height: finalHeight,
             name,
           });
-          setMarkers([]);
           setMergeSelection([]);
           historyRef.current = { past: [], future: [] };
           nextNumberRef.current = 1;
           colorCursorRef.current = 0;
           setColorIndex(0);
           setSelectedId(undefined);
-          setNotice(noticeText);
           setTool('point');
+          let restored = false;
+          if (storageKey !== undefined) {
+            const stored = readAnnotationStorage()[storageKey];
+            if (stored !== undefined && stored !== null
+              && stored.width === finalWidth && stored.height === finalHeight
+              && Array.isArray(stored.markers)) {
+              const restoredMarkers = renumberMarkers(stored.markers.map((marker) => ({ ...marker })));
+              setMarkers(restoredMarkers);
+              nextNumberRef.current = restoredMarkers.reduce((max, marker) => Math.max(max, marker.id), 0) + 1;
+              restored = restoredMarkers.length > 0;
+            } else {
+              setMarkers([]);
+            }
+          } else {
+            setMarkers([]);
+          }
+          setNotice(restored ? t('annotationsRestored') : noticeText);
         };
         element.onerror = () => {
           setNotice(`${t('errorPrefix')}${t('onlyImages')}`);
@@ -971,6 +1231,26 @@ window.__ModuleLoader__.load({
         element.src = url;
       }, [t]);
       loadFileRef.current = loadFile;
+
+      React.useEffect(() => {
+        if (image === null || imageKey === undefined) return undefined;
+        const timer = setTimeout(() => {
+          const storage = readAnnotationStorage();
+          delete storage[imageKey];
+          const entries = Object.entries(storage);
+          if (markers.length > 0) {
+            entries.push([imageKey, {
+              width: image.width,
+              height: image.height,
+              markers,
+              updatedAt: Date.now(),
+            }]);
+          }
+          entries.sort((left, right) => (right[1].updatedAt ?? 0) - (left[1].updatedAt ?? 0));
+          writeAnnotationStorage(Object.fromEntries(entries.slice(0, STORAGE_LIMIT)));
+        }, 500);
+        return () => clearTimeout(timer);
+      }, [markers, image, imageKey]);
 
       React.useEffect(() => () => {
         for (const url of objectUrlsRef.current) URL.revokeObjectURL(url);
@@ -1026,20 +1306,24 @@ window.__ModuleLoader__.load({
 
       React.useEffect(() => {
         const onKeyDown = (event) => {
+          const target = event.target;
+          const inField = target !== null && target !== undefined
+            && (target.tagName === 'TEXTAREA' || target.tagName === 'INPUT' || target.isContentEditable === true);
           if (event.key === 'Escape') {
             event.preventDefault();
+            if (mergeSelection.length > 0) {
+              setMergeSelection([]);
+              return;
+            }
             if (selectedRef.current !== undefined) {
               setSelectedId(undefined);
               return;
             }
-            if (markersRef.current.length > 0 && !window.confirm(t('closeConfirm'))) return;
+            if ((markersRef.current.length > 0 || batchRef.current.length > 0) && !window.confirm(t('closeConfirm'))) return;
             closedRef.current = true;
             store.close();
             return;
           }
-          const target = event.target;
-          const inField = target !== null && target !== undefined
-            && (target.tagName === 'TEXTAREA' || target.tagName === 'INPUT');
           if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
             if (inField) return;
             event.preventDefault();
@@ -1053,18 +1337,37 @@ window.__ModuleLoader__.load({
             redo();
             return;
           }
-          if ((event.key === 'Delete' || event.key === 'Backspace') && selectedRef.current !== undefined && !inField) {
+          if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'd') {
+            if (inField) return;
             event.preventDefault();
-            const id = selectedRef.current;
+            duplicateSelected();
+            return;
+          }
+          if ((event.key === 'Delete' || event.key === 'Backspace') && !inField) {
+            const ids = mergeSelection.length > 0
+              ? mergeSelection
+              : selectedRef.current === undefined ? [] : [selectedRef.current];
+            if (ids.length === 0) return;
+            event.preventDefault();
             pushHistory(markersRef.current);
-            setMarkers(renumberMarkers(markersRef.current.filter((marker) => marker.id !== id)));
+            const idSet = new Set(ids);
+            setMarkers(renumberMarkers(markersRef.current.filter((marker) => !idSet.has(marker.id))));
             setSelectedId(undefined);
-            setMergeSelection((previous) => previous.filter((candidate) => candidate !== id));
+            setMergeSelection([]);
+            return;
+          }
+          if (!inField && !event.ctrlKey && !event.metaKey && !event.altKey) {
+            const toolKeys = { m: 'move', p: 'point', r: 'rect', a: 'arrow', l: 'ruler', x: 'redact', c: 'crop' };
+            const nextTool = toolKeys[event.key.toLowerCase()];
+            if (nextTool !== undefined) {
+              event.preventDefault();
+              setTool(nextTool);
+            }
           }
         };
         window.addEventListener('keydown', onKeyDown);
         return () => window.removeEventListener('keydown', onKeyDown);
-      }, [t, undo, redo, pushHistory]);
+      }, [t, undo, redo, pushHistory, duplicateSelected, mergeSelection, image]);
 
       React.useEffect(() => {
         const onShift = (event) => {
@@ -1081,6 +1384,58 @@ window.__ModuleLoader__.load({
           window.removeEventListener('keyup', onShift);
         };
       }, []);
+
+      React.useEffect(() => {
+        const isField = (target) => target !== null && target !== undefined
+          && (target.tagName === 'TEXTAREA' || target.tagName === 'INPUT' || target.isContentEditable === true);
+        const onDown = (event) => {
+          if (event.code !== 'Space' || isField(event.target)) return;
+          event.preventDefault();
+          spacePressedRef.current = true;
+          setSpaceHeld(true);
+        };
+        const onUp = (event) => {
+          if (event.code !== 'Space') return;
+          spacePressedRef.current = false;
+          setSpaceHeld(false);
+        };
+        window.addEventListener('keydown', onDown);
+        window.addEventListener('keyup', onUp);
+        return () => {
+          window.removeEventListener('keydown', onDown);
+          window.removeEventListener('keyup', onUp);
+        };
+      }, []);
+
+      React.useEffect(() => {
+        const stage = stageRef.current;
+        if (stage === null || image === null) return undefined;
+        const onWheel = (event) => {
+          event.preventDefault();
+          if (event.shiftKey) {
+            stage.scrollLeft += event.deltaY;
+            return;
+          }
+          manualZoomRef.current = true;
+          const factor = event.deltaY > 0 ? 1 / 1.12 : 1.12;
+          const natural = toNatural(event);
+          setZoom((previous) => {
+            const next = clamp(Number((previous * factor).toFixed(4)), 0.05, 3);
+            requestAnimationFrame(() => {
+              const inner = stageInnerRef.current;
+              if (inner === null) return;
+              const rect = inner.getBoundingClientRect();
+              const pointX = rect.left + natural.x * next;
+              const pointY = rect.top + natural.y * next;
+              stage.scrollLeft += pointX - event.clientX;
+              stage.scrollTop += pointY - event.clientY;
+            });
+            return next;
+          });
+        };
+        stage.addEventListener('wheel', onWheel, { passive: false });
+        return () => stage.removeEventListener('wheel', onWheel);
+      }, [image]);
 
       const toNatural = (event) => {
         const svg = svgRef.current;
@@ -1110,6 +1465,20 @@ window.__ModuleLoader__.load({
             if (point.x >= left && point.x <= right && point.y >= top && point.y <= bottom) return marker;
             continue;
           }
+          if (marker.kind === 'arrow' && (marker.curve ?? 0) !== 0) {
+            const control = arrowControlPoint(marker);
+            const start = { x: marker.x1, y: marker.y1 };
+            const end = { x: marker.x2, y: marker.y2 };
+            let distance = Infinity;
+            let previous = start;
+            for (let step = 1; step <= 16; step += 1) {
+              const current = quadraticPoint(start, control, end, step / 16);
+              distance = Math.min(distance, distanceToSegment(point, previous, current));
+              previous = current;
+            }
+            if (distance <= Math.max(10, radius * 0.9)) return marker;
+            continue;
+          }
           const dx = marker.x2 - marker.x1;
           const dy = marker.y2 - marker.y1;
           const lengthSq = dx * dx + dy * dy;
@@ -1137,6 +1506,10 @@ window.__ModuleLoader__.load({
           x2: shape.x2 !== undefined ? shape.x2 : shape.x1,
           y2: shape.y2 !== undefined ? shape.y2 : shape.y1,
           comment: '',
+          dashed: styleDefaults.dashed,
+          doubleHead: styleDefaults.doubleHead,
+          weight: styleDefaults.weight,
+          curve: shape.kind === 'arrow' ? styleDefaults.curve : 0,
         };
         pushHistory(markersRef.current);
         setMarkers(renumberMarkers([...markersRef.current, marker]));
@@ -1198,23 +1571,98 @@ window.__ModuleLoader__.load({
         setMergeSelection([]);
       };
 
+      /** Copy the current selection a little down-right, keeping groups together. */
+      const duplicateSelected = () => {
+        if (image === null) return;
+        const ids = mergeSelection.length > 0
+          ? mergeSelection
+          : selectedId === undefined ? [] : [selectedId];
+        if (ids.length === 0) return;
+        pushHistory(markersRef.current);
+        const offsetX = image.width * 0.03;
+        const offsetY = image.height * 0.03;
+        let nextId = nextNumberRef.current;
+        const groupMap = new Map();
+        const clones = markersRef.current.filter((marker) => ids.includes(marker.id)).map((marker) => {
+          const id = nextId;
+          nextId += 1;
+          let groupId = groupMap.get(marker.groupId);
+          if (groupId === undefined) {
+            groupId = id;
+            groupMap.set(marker.groupId, groupId);
+          }
+          return {
+            ...marker,
+            id,
+            groupId,
+            x1: clamp(marker.x1 + offsetX, 0, image.width),
+            y1: clamp(marker.y1 + offsetY, 0, image.height),
+            x2: clamp(marker.x2 + offsetX, 0, image.width),
+            y2: clamp(marker.y2 + offsetY, 0, image.height),
+          };
+        });
+        if (clones.length === 0) return;
+        nextNumberRef.current = nextId;
+        setMarkers(renumberMarkers([...markersRef.current, ...clones]));
+        setMergeSelection(clones.map((marker) => marker.id));
+        setSelectedId(clones[0].id);
+      };
+
       const onPointerDown = (event) => {
-        if (image === null || event.button !== 0) return;
+        if (image === null) return;
+        if (event.button === 1 || spacePressedRef.current) {
+          event.preventDefault();
+          dragRef.current = {
+            mode: 'pan',
+            startClientX: event.clientX,
+            startClientY: event.clientY,
+            startLeft: stageRef.current?.scrollLeft ?? 0,
+            startTop: stageRef.current?.scrollTop ?? 0,
+          };
+          event.currentTarget.setPointerCapture(event.pointerId);
+          return;
+        }
+        if (event.button !== 0) return;
         const point = toNatural(event);
         if (tool === 'move') {
           const hit = hitTest(point);
-          if (hit === undefined) {
-            setSelectedId(undefined);
+          if (event.shiftKey) {
+            if (hit !== undefined) {
+              toggleMergeSelection(hit.id);
+              setSelectedId(hit.id);
+              return;
+            }
+            dragRef.current = { mode: 'marquee', start: point, additive: true };
+            setTemp({ kind: 'marquee', x1: point.x, y1: point.y, x2: point.x, y2: point.y });
+            event.currentTarget.setPointerCapture(event.pointerId);
             return;
           }
-          setSelectedId(hit.id);
-          pushHistory(markersRef.current);
-          dragRef.current = {
-            mode: 'move',
-            id: hit.id,
-            start: point,
-            original: { ...hit },
-          };
+          if (hit !== undefined) {
+            const ids = mergeSelection.includes(hit.id) && mergeSelection.length > 1
+              ? mergeSelection
+              : [hit.id];
+            setSelectedId(hit.id);
+            if (ids.length === 1) setMergeSelection([]);
+            pushHistory(markersRef.current);
+            dragRef.current = {
+              mode: 'move',
+              ids,
+              start: point,
+              originals: markersRef.current
+                .filter((marker) => ids.includes(marker.id))
+                .map((marker) => ({
+                  id: marker.id,
+                  x1: marker.x1,
+                  y1: marker.y1,
+                  x2: marker.x2,
+                  y2: marker.y2,
+                })),
+            };
+            event.currentTarget.setPointerCapture(event.pointerId);
+            return;
+          }
+          dragRef.current = { mode: 'marquee', start: point, additive: false };
+          setTemp({ kind: 'marquee', x1: point.x, y1: point.y, x2: point.x, y2: point.y });
           event.currentTarget.setPointerCapture(event.pointerId);
           return;
         }
@@ -1237,7 +1685,20 @@ window.__ModuleLoader__.load({
       const onPointerMove = (event) => {
         const drag = dragRef.current;
         if (drag === undefined || image === null) return;
+        if (drag.mode === 'pan') {
+          const stage = stageRef.current;
+          if (stage !== null) {
+            stage.scrollLeft = drag.startLeft - (event.clientX - drag.startClientX);
+            stage.scrollTop = drag.startTop - (event.clientY - drag.startClientY);
+          }
+          return;
+        }
         const point = toNatural(event);
+        if (drag.mode === 'marquee') {
+          drag.lastPoint = point;
+          setTemp({ kind: 'marquee', x1: drag.start.x, y1: drag.start.y, x2: point.x, y2: point.y });
+          return;
+        }
         if (drag.mode === 'draw' || drag.mode === 'crop') {
           const kind = drag.kind ?? 'crop';
           drag.lastPoint = point;
@@ -1247,9 +1708,10 @@ window.__ModuleLoader__.load({
         }
         const dx = point.x - drag.start.x;
         const dy = point.y - drag.start.y;
+        const originals = drag.originals ?? [];
         setMarkers((previous) => previous.map((marker) => {
-          if (marker.id !== drag.id) return marker;
-          const original = drag.original;
+          const original = originals.find((candidate) => candidate.id === marker.id);
+          if (original === undefined) return marker;
           return {
             ...marker,
             x1: clamp(original.x1 + dx, 0, image.width),
@@ -1263,7 +1725,39 @@ window.__ModuleLoader__.load({
       const onPointerUp = (event) => {
         const drag = dragRef.current;
         dragRef.current = undefined;
-        if (drag !== undefined && drag.mode === 'crop') {
+        if (drag !== undefined && drag.mode === 'pan') {
+          if (typeof event.currentTarget.releasePointerCapture === 'function') {
+            try {
+              event.currentTarget.releasePointerCapture(event.pointerId);
+            } catch {
+              // Pointer capture may already be gone.
+            }
+          }
+          return;
+        }
+        if (drag !== undefined && drag.mode === 'marquee') {
+          const shape = temp;
+          setTemp(null);
+          if (shape !== null) {
+            const left = Math.min(shape.x1, shape.x2);
+            const right = Math.max(shape.x1, shape.x2);
+            const top = Math.min(shape.y1, shape.y2);
+            const bottom = Math.max(shape.y1, shape.y2);
+            const radius = badgeRadiusFor(image);
+            const ids = markersRef.current.filter((marker) => {
+              if (marker.kind === 'point') {
+                return marker.x1 >= left && marker.x1 <= right && marker.y1 >= top && marker.y1 <= bottom;
+              }
+              const markerLeft = Math.min(marker.x1, marker.x2) - radius;
+              const markerRight = Math.max(marker.x1, marker.x2) + radius;
+              const markerTop = Math.min(marker.y1, marker.y2) - radius;
+              const markerBottom = Math.max(marker.y1, marker.y2) + radius;
+              return markerLeft <= right && markerRight >= left && markerTop <= bottom && markerBottom >= top;
+            }).map((marker) => marker.id);
+            setMergeSelection((previous) => (drag.additive ? [...new Set([...previous, ...ids])] : ids));
+            setSelectedId(ids[0]);
+          }
+        } else if (drag !== undefined && drag.mode === 'crop') {
           const shape = temp;
           setTemp(null);
           if (shape !== null) {
@@ -1285,9 +1779,20 @@ window.__ModuleLoader__.load({
           const shape = { kind: drag.kind, x1: drag.start.x, y1: drag.start.y, x2: endPoint.x, y2: endPoint.y };
           const width = Math.abs(shape.x2 - shape.x1);
           const height = Math.abs(shape.y2 - shape.y1);
-          if (shape.kind === 'rect' && width < 6 && height < 6) return;
-          if ((shape.kind === 'arrow' || shape.kind === 'ruler') && Math.hypot(width, height) < 10) return;
-          addMarker(shape);
+          if (shape.kind === 'redact') {
+            if (width >= 8 && height >= 8) {
+              void applyRedact({
+                x: Math.min(shape.x1, shape.x2),
+                y: Math.min(shape.y1, shape.y2),
+                width,
+                height,
+              });
+            }
+          } else {
+            if (shape.kind === 'rect' && width < 6 && height < 6) return;
+            if ((shape.kind === 'arrow' || shape.kind === 'ruler') && Math.hypot(width, height) < 10) return;
+            addMarker(shape);
+          }
         }
         if (typeof event.currentTarget.releasePointerCapture === 'function') {
           try {
@@ -1318,51 +1823,126 @@ window.__ModuleLoader__.load({
       const handleDownload = () => {
         if (image === null) return;
         try {
-          const dataUrl = renderExport(image, markersRef.current, quality);
-          downloadDataUrl(dataUrl, fileNameFor(image));
+          const exported = renderExport(image, markersRef.current, quality, format);
+          downloadDataUrl(exported.dataUrl, fileNameFor(image, exported.ext));
         } catch (error) {
           setNotice(`${t('errorPrefix')}${error instanceof Error ? error.message : String(error)}`);
         }
       };
 
+      const addToBatch = () => {
+        if (image === null) return;
+        const next = [...batch, {
+          image,
+          markers: markersRef.current.slice(),
+          quality,
+          format,
+          textOnly,
+          name: image.name,
+        }];
+        setBatch(next);
+        setImage(null);
+        setImageKey(undefined);
+        setMarkers([]);
+        setMergeSelection([]);
+        historyRef.current = { past: [], future: [] };
+        nextNumberRef.current = 1;
+        setSelectedId(undefined);
+        setNotice(t('batchAdded').replace('{n}', String(next.length)));
+      };
+
+      const clearBatch = () => {
+        setBatch([]);
+        setNotice('');
+      };
+
       const handleInsert = async () => {
-        if (image === null || busy) return;
+        const items = [...batch];
+        if (image !== null) {
+          items.push({
+            image,
+            markers: markersRef.current.slice(),
+            quality,
+            format,
+            textOnly,
+            name: image.name,
+          });
+        }
+        if (items.length === 0 || busy) return;
         setBusy(true);
         setNotice('');
-        let dataUrl;
+        const savedItems = [];
         try {
-          dataUrl = renderExport(image, markersRef.current, quality);
+          for (const item of items) {
+            if (item.textOnly) {
+              savedItems.push({
+                image: item.image,
+                markers: item.markers,
+                path: undefined,
+                width: item.image.width,
+                height: item.image.height,
+                textOnly: true,
+                quality: item.quality,
+                format: item.format,
+              });
+              continue;
+            }
+            const exported = renderExport(item.image, item.markers, item.quality, item.format);
+            const saved = await saveAnnotation(sessionId, exported.dataUrl, exported.width, exported.height);
+            savedItems.push({
+              image: item.image,
+              markers: item.markers,
+              path: saved.path,
+              width: saved.width ?? exported.width,
+              height: saved.height ?? exported.height,
+              textOnly: false,
+              quality: item.quality,
+              format: item.format,
+            });
+          }
         } catch (error) {
-          setBusy(false);
-          setNotice(`${t('errorPrefix')}${error instanceof Error ? error.message : String(error)}`);
-          return;
-        }
-        let saved;
-        try {
-          saved = await saveAnnotation(sessionId, dataUrl);
-        } catch (error) {
-          const text = buildLegend(undefined, image, markersRef.current, quality, t);
-          downloadDataUrl(dataUrl, fileNameFor(image));
+          const text = items.length === 1 && image !== null
+            ? buildLegend(undefined, image, markersRef.current, quality, t, { textOnly })
+            : buildBatchLegend(items.map((item) => ({ ...item, path: undefined })), t);
+          if (image !== null) {
+            try {
+              const exported = renderExport(image, markersRef.current, quality, format);
+              downloadDataUrl(exported.dataUrl, fileNameFor(image, exported.ext));
+            } catch {
+              // The image could not be rendered either; the copied text still carries the markers.
+            }
+          }
           await copyText(text);
           setNotice(t('saveFailed'));
           setBusy(false);
           return;
         }
-        const text = buildLegend(saved.path, image, markersRef.current, quality, t);
+        const text = savedItems.length === 1
+          ? buildLegend(savedItems[0].path, savedItems[0].image, savedItems[0].markers, savedItems[0].quality, t, { textOnly: savedItems[0].textOnly })
+          : buildBatchLegend(savedItems, t);
         const inserted = await store.insert(text);
         if (inserted) {
+          setBatch([]);
           closedRef.current = true;
           store.close();
           return;
         }
-        downloadDataUrl(dataUrl, fileNameFor(image));
+        for (const savedItem of savedItems) {
+          if (savedItem.textOnly) continue;
+          try {
+            const exported = renderExport(savedItem.image, savedItem.markers, savedItem.quality ?? quality, savedItem.format ?? format);
+            downloadDataUrl(exported.dataUrl, fileNameFor(savedItem.image, exported.ext));
+          } catch {
+            // Keep trying the remaining items.
+          }
+        }
         await copyText(text);
         setNotice(t('insertFailed'));
         setBusy(false);
       };
 
       const handleClose = () => {
-        if (markers.length > 0 && !window.confirm(t('closeConfirm'))) return;
+        if ((markers.length > 0 || batch.length > 0) && !window.confirm(t('closeConfirm'))) return;
         closedRef.current = true;
         store.close();
       };
@@ -1473,6 +2053,7 @@ window.__ModuleLoader__.load({
           setColorIndex(0);
           setSelectedId(undefined);
           setTool('point');
+          setImageKey(undefined);
           manualZoomRef.current = false;
           setNotice(t('croppedNotice').replace('{w}', String(cropped.width)).replace('{h}', String(cropped.height)));
         } catch (error) {
@@ -1484,17 +2065,64 @@ window.__ModuleLoader__.load({
       const restoreOriginalImage = () => {
         const previous = imageHistoryRef.current.pop();
         if (previous === undefined) return;
+        const sameSize = image !== null && previous.width === image.width && previous.height === image.height;
         setImage(previous);
-        setMarkers([]);
-        setMergeSelection([]);
-        historyRef.current = { past: [], future: [] };
-        nextNumberRef.current = 1;
-        colorCursorRef.current = 0;
-        setColorIndex(0);
-        setSelectedId(undefined);
+        if (!sameSize) {
+          setMarkers([]);
+          setMergeSelection([]);
+          historyRef.current = { past: [], future: [] };
+          nextNumberRef.current = 1;
+          colorCursorRef.current = 0;
+          setColorIndex(0);
+          setSelectedId(undefined);
+        }
         manualZoomRef.current = false;
         setCropHistoryVersion((value) => value + 1);
+        setImageKey(undefined);
         setNotice(t('restoredNotice'));
+      };
+
+      /** Bake a pixelated rectangle into the image to hide sensitive content. */
+      const applyRedact = async (rect) => {
+        if (image === null) return;
+        const x = clamp(rect.x, 0, image.width - 1);
+        const y = clamp(rect.y, 0, image.height - 1);
+        const width = Math.min(rect.width, image.width - x);
+        const height = Math.min(rect.height, image.height - y);
+        if (width < 8 || height < 8) return;
+        try {
+          const canvas = document.createElement('canvas');
+          canvas.width = image.width;
+          canvas.height = image.height;
+          const target = canvas.getContext('2d');
+          if (target === null) throw new Error('canvas 2d context is unavailable');
+          target.drawImage(image.element, 0, 0);
+          const block = 12;
+          const smallWidth = Math.max(1, Math.round(width / block));
+          const smallHeight = Math.max(1, Math.round(height / block));
+          const small = document.createElement('canvas');
+          small.width = smallWidth;
+          small.height = smallHeight;
+          const smallTarget = small.getContext('2d');
+          if (smallTarget === null) throw new Error('canvas 2d context is unavailable');
+          smallTarget.drawImage(image.element, x, y, width, height, 0, 0, smallWidth, smallHeight);
+          target.imageSmoothingEnabled = false;
+          target.drawImage(small, 0, 0, smallWidth, smallHeight, x, y, width, height);
+          const dataUrl = canvas.toDataURL('image/png');
+          const element = await loadImageElement(dataUrl);
+          pushImageHistory(image);
+          setImage({
+            element,
+            url: dataUrl,
+            width: image.width,
+            height: image.height,
+            name: image.name,
+          });
+          setImageKey(undefined);
+          setNotice(t('redactDone'));
+        } catch (error) {
+          setNotice(`${t('errorPrefix')}${error instanceof Error ? error.message : String(error)}`);
+        }
       };
 
       React.useEffect(() => {
@@ -1522,7 +2150,7 @@ window.__ModuleLoader__.load({
         const hit = hitTest(point);
         setContextMenu({
           x: clamp(event.clientX, 8, Math.max(8, window.innerWidth - 256)),
-          y: clamp(event.clientY, 8, Math.max(8, window.innerHeight - 210)),
+          y: clamp(event.clientY, 8, Math.max(8, window.innerHeight - 430)),
           markerId: hit === undefined ? undefined : hit.id,
         });
         if (hit !== undefined) setSelectedId(hit.id);
@@ -1564,6 +2192,25 @@ window.__ModuleLoader__.load({
         setSelectedId(menu.markerId);
       };
 
+      /** Apply a line style to the chosen marker(s), or make it the default for the next one. */
+      const applyMarkerStyle = (patch) => {
+        const menu = contextMenu;
+        setContextMenu(null);
+        if (menu === null) return;
+        if (menu.markerId === undefined) {
+          setStyleDefaults((previous) => ({ ...previous, ...patch }));
+          return;
+        }
+        const ids = mergeSelection.includes(menu.markerId) && mergeSelection.length > 1
+          ? mergeSelection
+          : [menu.markerId];
+        pushHistory(markersRef.current);
+        setMarkers((previous) => previous.map((marker) => (
+          ids.includes(marker.id) ? { ...marker, ...patch } : marker
+        )));
+        setSelectedId(menu.markerId);
+      };
+
       /** Right-click menu: shape and color for an existing marker or for the next one. */
       const renderContextMenu = () => {
         if (contextMenu === null || image === null) return null;
@@ -1574,6 +2221,36 @@ window.__ModuleLoader__.load({
         const currentColor = current === undefined
           ? MARKER_COLORS[colorIndex % MARKER_COLORS.length].id
           : current.color;
+        const currentStyle = current === undefined
+          ? styleDefaults
+          : {
+            dashed: current.dashed === true,
+            doubleHead: current.doubleHead === true,
+            weight: current.weight ?? 2,
+            curve: (current.curve ?? 0) !== 0 ? 0.45 : 0,
+          };
+        const styleOption = (label, active, patch) => h('button', {
+          type: 'button',
+          className: active ? 'sa-ctx-item sa-active' : 'sa-ctx-item',
+          onClick: () => applyMarkerStyle(patch),
+        }, label);
+        const typeRow = h('div', { className: 'sa-ctx-row sa-ctx-types' },
+          ['point', 'rect', 'arrow', 'ruler'].map((kind) => h('button', {
+            key: kind,
+            type: 'button',
+            className: currentKind === kind ? 'sa-ctx-item sa-active' : 'sa-ctx-item',
+            onClick: () => applyContextKind(kind),
+          }, h(Icon, { name: kind, size: 14 }), t(kind === 'point' ? 'toolPoint' : kind === 'rect' ? 'toolRect' : kind === 'ruler' ? 'toolRuler' : 'toolArrow'))));
+        const meaningRow = h('div', { className: 'sa-ctx-row sa-ctx-presets' },
+          MARKER_COLORS.map((color) => h('button', {
+            key: color.id,
+            type: 'button',
+            className: currentColor === color.id ? 'sa-ctx-preset sa-active' : 'sa-ctx-preset',
+            title: t(COLOR_KEYS[color.id]),
+            'aria-label': `${t(MEANING_BY_COLOR[color.id])} · ${t(COLOR_KEYS[color.id])}`,
+            onClick: () => applyContextColor(color),
+          }, h('span', { className: 'sa-preset-dot', style: { background: color.value } }),
+          h('span', { className: 'sa-preset-label' }, t(MEANING_BY_COLOR[color.id])))));
         return h('div', {
           className: 'sa-ctx',
           style: { left: `${contextMenu.x}px`, top: `${contextMenu.y}px` },
@@ -1583,75 +2260,87 @@ window.__ModuleLoader__.load({
         h('div', { className: 'sa-ctx-title' },
           current === undefined ? t('ctxNewMarker') : `${t('ctxMarker')} #${current.no}`),
         h('div', { className: 'sa-ctx-label' }, t('ctxType')),
-        h('div', { className: 'sa-ctx-row sa-ctx-types' },
-          ['point', 'rect', 'arrow', 'ruler'].map((kind) => h('button', {
-            key: kind,
-            type: 'button',
-            className: currentKind === kind ? 'sa-ctx-item sa-active' : 'sa-ctx-item',
-            onClick: () => applyContextKind(kind),
-          }, h(Icon, { name: kind, size: 14 }), t(kind === 'point' ? 'toolPoint' : kind === 'rect' ? 'toolRect' : kind === 'ruler' ? 'toolRuler' : 'toolArrow')))),
+        typeRow,
         h('div', { className: 'sa-ctx-label' }, t('ctxMeaning')),
-        h('div', { className: 'sa-ctx-row sa-ctx-presets' },
-          MARKER_COLORS.map((color) => h('button', {
-            key: color.id,
-            type: 'button',
-            className: currentColor === color.id ? 'sa-ctx-preset sa-active' : 'sa-ctx-preset',
-            title: t(COLOR_KEYS[color.id]),
-            'aria-label': `${t(MEANING_BY_COLOR[color.id])} · ${t(COLOR_KEYS[color.id])}`,
-            onClick: () => applyContextColor(color),
-          },
-          h('span', { className: 'sa-preset-dot', style: { background: color.value } }),
-          h('span', { className: 'sa-preset-label' }, t(MEANING_BY_COLOR[color.id]))))));
+        meaningRow,
+        h('div', { className: 'sa-ctx-label' }, t('styleLine')),
+        h('div', { className: 'sa-ctx-row' },
+          styleOption(t('styleSolid'), currentStyle.dashed !== true, { dashed: false }),
+          styleOption(t('styleDashed'), currentStyle.dashed === true, { dashed: true })),
+        h('div', { className: 'sa-ctx-label' }, t('styleHeads')),
+        h('div', { className: 'sa-ctx-row' },
+          styleOption(t('styleOneHead'), currentStyle.doubleHead !== true, { doubleHead: false }),
+          styleOption(t('styleTwoHeads'), currentStyle.doubleHead === true, { doubleHead: true })),
+        h('div', { className: 'sa-ctx-label' }, t('styleWeight')),
+        h('div', { className: 'sa-ctx-row' },
+          styleOption(t('styleThin'), currentStyle.weight === 1, { weight: 1 }),
+          styleOption(t('styleNormal'), currentStyle.weight !== 1 && currentStyle.weight !== 3, { weight: 2 }),
+          styleOption(t('styleThick'), currentStyle.weight === 3, { weight: 3 })),
+        h('div', { className: 'sa-ctx-label' }, t('styleShape')),
+        h('div', { className: 'sa-ctx-row' },
+          styleOption(t('styleStraight'), currentStyle.curve === 0, { curve: 0 }),
+          styleOption(t('styleCurved'), currentStyle.curve !== 0, { curve: 0.45 }))
+        );
       };
 
       const radius = image === null ? 0 : badgeRadiusFor(image);
 
+      const badgePositions = image === null ? new Map() : computeBadgePositions(markers, image, radius);
+
       const renderMarkerShape = (marker) => {
         const color = colorById(marker.color);
-        const isSelected = marker.id === selectedId;
-        const badge = (cx, cy) => h('g', { key: 'badge' }, [
-          h('circle', {
-            key: 'ring',
-            cx,
-            cy,
-            r: radius * 1.32,
-            fill: 'none',
-            stroke: isSelected ? '#ffffff' : 'rgba(255,255,255,0)',
-            strokeWidth: Math.max(1.5, radius * 0.12),
-            strokeDasharray: isSelected ? `${radius * 0.5} ${radius * 0.35}` : undefined,
-          }),
-          h('circle', {
-            key: 'dot',
-            cx,
-            cy,
-            r: radius,
-            fill: color.value,
-            stroke: 'rgba(255,255,255,0.96)',
-            strokeWidth: Math.max(1.5, radius * 0.16),
-          }),
-          h('circle', {
-            key: 'edge',
-            cx,
-            cy,
-            r: radius,
-            fill: 'none',
-            stroke: 'rgba(0,0,0,0.3)',
-            strokeWidth: Math.max(1, radius * 0.06),
-          }),
-          h('text', {
-            key: 'no',
-            x: cx,
-            y: cy,
-            fill: color.text,
-            fontSize: radius * 1.32,
-            fontWeight: 700,
-            textAnchor: 'middle',
-            dominantBaseline: 'central',
-            style: { userSelect: 'none', pointerEvents: 'none' },
-          }, String(marker.no)),
-        ]);
+        const isSelected = marker.id === selectedId || mergeSelection.includes(marker.id);
+        const position = badgePositions.get(marker.id) ?? badgeBase(marker, radius);
+        const badge = () => {
+          const cx = clamp(position.x, radius, image.width - radius);
+          const cy = clamp(position.y, radius, image.height - radius);
+          return h('g', { key: 'badge' }, [
+            h('circle', {
+              key: 'ring',
+              cx,
+              cy,
+              r: radius * 1.32,
+              fill: 'none',
+              stroke: isSelected ? '#ffffff' : 'rgba(255,255,255,0)',
+              strokeWidth: Math.max(1.5, radius * 0.12),
+              strokeDasharray: isSelected ? `${radius * 0.5} ${radius * 0.35}` : undefined,
+            }),
+            h('circle', {
+              key: 'dot',
+              cx,
+              cy,
+              r: radius,
+              fill: color.value,
+              stroke: 'rgba(255,255,255,0.96)',
+              strokeWidth: Math.max(1.5, radius * 0.16),
+            }),
+            h('circle', {
+              key: 'edge',
+              cx,
+              cy,
+              r: radius,
+              fill: 'none',
+              stroke: 'rgba(0,0,0,0.3)',
+              strokeWidth: Math.max(1, radius * 0.06),
+            }),
+            h('text', {
+              key: 'no',
+              x: cx,
+              y: cy,
+              fill: color.text,
+              fontSize: radius * 1.32,
+              fontWeight: 700,
+              textAnchor: 'middle',
+              dominantBaseline: 'central',
+              style: { userSelect: 'none', pointerEvents: 'none' },
+            }, String(marker.no)),
+          ]);
+        };
+        const weight = marker.weight === 1 ? 0.7 : marker.weight === 3 ? 1.5 : 1;
+        const strokeW = Math.max(2, image.width * 0.0026 * weight);
+        const dash = marker.dashed === true ? `${radius * 0.9} ${radius * 0.6}` : undefined;
         if (marker.kind === 'point') {
-          return h('g', { key: marker.id }, [badge(clamp(marker.x1, radius, image.width - radius), clamp(marker.y1, radius, image.height - radius))]);
+          return h('g', { key: marker.id }, [badge()]);
         }
         if (marker.kind === 'rect') {
           const left = Math.min(marker.x1, marker.x2);
@@ -1676,10 +2365,10 @@ window.__ModuleLoader__.load({
               height,
               fill: 'none',
               stroke: color.value,
-              strokeWidth: Math.max(2, image.width * 0.0026),
-              strokeDasharray: isSelected ? `${radius * 0.5} ${radius * 0.35}` : undefined,
+              strokeWidth: strokeW,
+              strokeDasharray: dash,
             }),
-            badge(clamp(left, radius, image.width - radius), clamp(top, radius, image.height - radius)),
+            badge(),
           ]);
         }
         if (marker.kind === 'ruler') {
@@ -1689,7 +2378,6 @@ window.__ModuleLoader__.load({
           const tick = Math.max(10, radius * 0.9);
           const tickX = -Math.sin(angleR) * tick;
           const tickY = Math.cos(angleR) * tick;
-          const strokeW = Math.max(2, image.width * 0.0026);
           return h('g', { key: marker.id }, [
             h('line', {
               key: 'line',
@@ -1700,7 +2388,7 @@ window.__ModuleLoader__.load({
               stroke: color.value,
               strokeWidth: strokeW,
               strokeLinecap: 'round',
-              strokeDasharray: isSelected ? `${radius * 0.5} ${radius * 0.35}` : undefined,
+              strokeDasharray: dash,
             }),
             h('path', {
               key: 'ticks',
@@ -1709,44 +2397,52 @@ window.__ModuleLoader__.load({
               stroke: color.value,
               strokeWidth: strokeW,
               strokeLinecap: 'round',
+              strokeDasharray: dash,
             }),
-            badge(
-              clamp((marker.x1 + marker.x2) / 2 - Math.sin(angleR) * radius * 1.5, radius, image.width - radius),
-              clamp((marker.y1 + marker.y2) / 2 + Math.cos(angleR) * radius * 1.5, radius, image.height - radius),
-            ),
+            badge(),
           ]);
         }
-        const dx = marker.x2 - marker.x1;
-        const dy = marker.y2 - marker.y1;
-        const angle = Math.atan2(dy, dx);
+        const control = arrowControlPoint(marker);
+        const curved = (marker.curve ?? 0) !== 0;
+        const angle = arrowHeadAngle(marker, control);
         const head = Math.max(10, radius * 1.2);
+        const headPolygon = (x, y, direction) => [
+          `${x},${y}`,
+          `${x - head * Math.cos(direction - Math.PI / 7)},${y - head * Math.sin(direction - Math.PI / 7)}`,
+          `${x - head * Math.cos(direction + Math.PI / 7)},${y - head * Math.sin(direction + Math.PI / 7)}`,
+        ].join(' ');
+        const startAngle = curved
+          ? Math.atan2(marker.y1 - control.y, marker.x1 - control.x)
+          : angle + Math.PI;
         return h('g', { key: marker.id }, [
-          h('line', {
+          h('path', {
             key: 'line',
-            x1: marker.x1,
-            y1: marker.y1,
-            x2: marker.x2,
-            y2: marker.y2,
+            d: curved
+              ? `M ${marker.x1} ${marker.y1} Q ${control.x} ${control.y} ${marker.x2} ${marker.y2}`
+              : `M ${marker.x1} ${marker.y1} L ${marker.x2} ${marker.y2}`,
+            fill: 'none',
             stroke: color.value,
-            strokeWidth: Math.max(2, image.width * 0.0026),
+            strokeWidth: strokeW,
             strokeLinecap: 'round',
-            strokeDasharray: isSelected ? `${radius * 0.5} ${radius * 0.35}` : undefined,
+            strokeDasharray: dash,
           }),
           h('polygon', {
             key: 'head',
-            points: [
-              `${marker.x2},${marker.y2}`,
-              `${marker.x2 - head * Math.cos(angle - Math.PI / 7)},${marker.y2 - head * Math.sin(angle - Math.PI / 7)}`,
-              `${marker.x2 - head * Math.cos(angle + Math.PI / 7)},${marker.y2 - head * Math.sin(angle + Math.PI / 7)}`,
-            ].join(' '),
+            points: headPolygon(marker.x2, marker.y2, angle),
             fill: color.value,
             stroke: 'rgba(255,255,255,0.9)',
             strokeWidth: Math.max(1, image.width * 0.0012),
           }),
-          badge(
-            clamp(marker.x2 + Math.cos(angle + Math.PI / 2) * radius * 1.15, radius, image.width - radius),
-            clamp(marker.y2 + Math.sin(angle + Math.PI / 2) * radius * 1.15, radius, image.height - radius),
-          ),
+          marker.doubleHead === true
+            ? h('polygon', {
+              key: 'head-start',
+              points: headPolygon(marker.x1, marker.y1, startAngle),
+              fill: color.value,
+              stroke: 'rgba(255,255,255,0.9)',
+              strokeWidth: Math.max(1, image.width * 0.0012),
+            })
+            : null,
+          badge(),
         ]);
       };
 
@@ -1795,6 +2491,7 @@ window.__ModuleLoader__.load({
                   h(ToolButton, { active: tool === 'rect', title: t('toolRect'), name: 'rect', onClick: () => setTool('rect') }),
                   h(ToolButton, { active: tool === 'arrow', title: t('toolArrow'), name: 'arrow', onClick: () => setTool('arrow') }),
                   h(ToolButton, { active: tool === 'ruler', title: t('toolRuler'), name: 'ruler', onClick: () => setTool('ruler') }),
+                  h(ToolButton, { active: tool === 'redact', title: t('toolRedact'), name: 'redact', onClick: () => setTool('redact') }),
                   h(ToolButton, { active: tool === 'crop', title: t('toolCrop'), name: 'crop', onClick: () => setTool('crop') })),
                 h('div', { className: 'sa-group' },
                   h('div', { className: 'sa-swatches' },
@@ -1848,10 +2545,12 @@ window.__ModuleLoader__.load({
                   alignItems: 'center',
                   justifyContent: 'flex-start',
                   background: 'radial-gradient(circle at 30% 20%, rgba(255,255,255,.045), transparent 60%), #0b0d12',
+                  cursor: spaceHeld ? 'grab' : 'default',
                 },
                 onContextMenu: openContextMenu,
               },
                 h('div', {
+                  ref: stageInnerRef,
                   className: 'sa-stage-inner',
                   style: { position: 'relative', flex: '0 0 auto', width: `${Math.max(1, Math.round(image.width * zoom))}px` },
                 },
@@ -1868,21 +2567,23 @@ window.__ModuleLoader__.load({
                   },
                   markers.map(renderMarkerShape),
                   temp === null ? null : h('g', { key: 'temp', opacity: 0.85 },
-                    temp.kind === 'rect' || temp.kind === 'crop'
+                    ['rect', 'crop', 'marquee', 'redact'].includes(temp.kind)
                       ? h('rect', {
                         x: Math.min(temp.x1, temp.x2),
                         y: Math.min(temp.y1, temp.y2),
                         width: Math.abs(temp.x2 - temp.x1),
                         height: Math.abs(temp.y2 - temp.y1),
-                        fill: temp.kind === 'crop'
-                          ? 'rgba(255,255,255,0.06)'
-                          : colorById(MARKER_COLORS[colorIndex % MARKER_COLORS.length].id).value,
-                        fillOpacity: temp.kind === 'crop' ? 1 : 0.16,
-                        stroke: temp.kind === 'crop'
-                          ? '#ffffff'
-                          : colorById(MARKER_COLORS[colorIndex % MARKER_COLORS.length].id).value,
+                        fill: temp.kind === 'rect'
+                          ? colorById(MARKER_COLORS[colorIndex % MARKER_COLORS.length].id).value
+                          : 'rgba(255,255,255,0.06)',
+                        fillOpacity: temp.kind === 'rect' ? 0.16 : 1,
+                        stroke: temp.kind === 'rect'
+                          ? colorById(MARKER_COLORS[colorIndex % MARKER_COLORS.length].id).value
+                          : '#ffffff',
                         strokeWidth: Math.max(2, image.width * 0.0026),
-                        strokeDasharray: temp.kind === 'crop' ? `${image.width * 0.01} ${image.width * 0.006}` : undefined,
+                        strokeDasharray: temp.kind === 'rect'
+                          ? undefined
+                          : `${image.width * 0.01} ${image.width * 0.006}`,
                       })
                       : h('line', {
                         x1: temp.x1,
@@ -1988,7 +2689,8 @@ window.__ModuleLoader__.load({
               h('pre', null, legendText)))),
         h('div', { className: 'sa-foot' },
           h('span', { className: 'sa-foot-info' },
-            image === null ? '' : `${image.width}×${image.height} px · ${t('tokenEstimate').replace('{count}', String(estimateTokens(image, quality)))}`),
+            image === null ? '' : `${image.width}×${image.height} px · ${t('tokenEstimate').replace('{count}', String(estimateTokens(image, quality)))}`,
+            batch.length > 0 ? ` · ${t('batchCount').replace('{n}', String(batch.length))}` : ''),
           h('span', { className: 'sa-notice' }, notice),
           h('div', { className: 'sa-actions' },
             cropHistoryVersion > 0 && imageHistoryRef.current.length > 0
@@ -1999,6 +2701,38 @@ window.__ModuleLoader__.load({
                 onClick: restoreOriginalImage,
               }, t('restore'))
               : null,
+            batch.length > 0
+              ? h('button', {
+                type: 'button',
+                className: 'sa-btn',
+                disabled: busy,
+                onClick: clearBatch,
+              }, t('batchClear'))
+              : null,
+            h('label', { className: 'sa-foot-field' },
+              t('format'),
+              h('select', {
+                value: format,
+                onChange: (event) => setFormat(event.target.value),
+              },
+              h('option', { value: 'png' }, 'PNG'),
+              h('option', { value: 'jpeg' }, 'JPEG'),
+              h('option', { value: 'webp' }, 'WebP'))),
+            h('label', { className: 'sa-foot-check', title: t('textOnly') },
+              h('input', {
+                type: 'checkbox',
+                checked: textOnly,
+                onChange: (event) => setTextOnly(event.target.checked),
+              }),
+              t('textOnly')),
+            image === null
+              ? null
+              : h('button', {
+                type: 'button',
+                className: 'sa-btn',
+                disabled: busy,
+                onClick: addToBatch,
+              }, t('batchAdd')),
             h('button', {
               type: 'button',
               className: 'sa-btn',
@@ -2006,16 +2740,18 @@ window.__ModuleLoader__.load({
               disabled: image === null || busy,
               onClick: handleDownload,
             }, h(Icon, { name: 'download', size: 14 }), t('save')),
-            h('button', {
-              type: 'button',
-              className: 'sa-btn',
-              disabled: busy,
-              onClick: () => fileRef.current?.click(),
-            }, t('replaceImage')),
+            image === null
+              ? null
+              : h('button', {
+                type: 'button',
+                className: 'sa-btn',
+                disabled: busy,
+                onClick: () => fileRef.current?.click(),
+              }, t('replaceImage')),
             h('button', {
               type: 'button',
               className: 'sa-btn sa-primary',
-              disabled: image === null || busy,
+              disabled: busy || (image === null && batch.length === 0),
               onClick: handleInsert,
             }, busy ? t('working') : t('insert')))),
         h('input', {
@@ -2038,19 +2774,9 @@ window.__ModuleLoader__.load({
     }
 
     /** Format the legend text for the composer. */
-    function buildLegend(filePath, image, markers, quality, t) {
-      const scale = quality > 0 ? Math.min(1, quality / Math.max(image.width, image.height)) : 1;
-      const width = Math.round(image.width * scale);
-      const height = Math.round(image.height * scale);
-      const header = filePath === undefined
-        ? t('legendWithoutPath')
-        : t('legendWithPath');
-      const lines = [header.replace('{path}', filePath ?? '').replace('{w}', String(width)).replace('{h}', String(height))];
-      if (markers.length === 0) {
-        lines.push(t('legendNoMarkers'));
-        return lines.join('\n');
-      }
-      lines.push(t('legendCoords'));
+    function buildMarkerLines(image, markers, t) {
+      if (markers.length === 0) return [t('legendNoMarkers')];
+      const lines = [];
       for (const group of groupMarkers(markers)) {
         const leader = group.markers[0];
         const color = t(COLOR_KEYS[leader.color] ?? 'colorRed');
@@ -2063,12 +2789,47 @@ window.__ModuleLoader__.load({
         ));
         lines.push(`#${leader.no} ${color}${meaningText} ${parts.join(' + ')}${suffix}`);
       }
+      return lines;
+    }
+
+    function buildLegend(filePath, image, markers, quality, t, options = {}) {
+      const scale = quality > 0 ? Math.min(1, quality / Math.max(image.width, image.height)) : 1;
+      const width = Math.round(image.width * scale);
+      const height = Math.round(image.height * scale);
+      const header = options.textOnly === true
+        ? t('legendTextOnly')
+        : filePath === undefined
+          ? t('legendWithoutPath')
+          : t('legendWithPath');
+      const lines = [header.replace('{path}', filePath ?? '').replace('{w}', String(width)).replace('{h}', String(height))];
+      if (markers.length === 0) {
+        lines.push(t('legendNoMarkers'));
+        return lines.join('\n');
+      }
+      lines.push(t('legendCoords'));
+      lines.push(...buildMarkerLines(image, markers, t));
       return lines.join('\n');
     }
 
-    function fileNameFor(image) {
+    function buildBatchLegend(items, t) {
+      const lines = [t('legendBatch').replace('{n}', String(items.length))];
+      items.forEach((item, index) => {
+        const number = index + 1;
+        if (item.textOnly || item.path === undefined) {
+          lines.push(`${number}. ${t('itemText')}`);
+        } else {
+          lines.push(`${number}. ${item.path} (${item.width}×${item.height})`);
+        }
+        for (const markerLine of buildMarkerLines(item.image, item.markers, t)) {
+          lines.push(`   ${markerLine}`);
+        }
+      });
+      return lines.join('\n');
+    }
+
+    function fileNameFor(image, ext = 'png') {
       const stamp = new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19);
-      return `annotated-${stamp}.png`;
+      return `annotated-${stamp}.${ext}`;
     }
 
     function downloadDataUrl(dataUrl, filename) {
@@ -2088,11 +2849,11 @@ window.__ModuleLoader__.load({
       }
     }
 
-    async function saveAnnotation(sessionId, dataUrl) {
+    async function saveAnnotation(sessionId, dataUrl, width, height) {
       const response = await fetch(SAVE_ROUTE, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ sessionId, dataUrl }),
+        body: JSON.stringify({ sessionId, dataUrl, width, height }),
       });
       let payload;
       try {
